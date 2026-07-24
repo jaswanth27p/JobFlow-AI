@@ -4,18 +4,22 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { Agent } from '@mastra/core/agent'
+import { noopLogger } from '@mastra/core/logger'
 import { createTool } from '@mastra/core/tools'
 import { AgentBrowser } from '@mastra/agent-browser'
-import { getSharedCdpUrl } from '../browser/session.ts'
+import { getEasyApplyCdpUrl } from '../browser/easy-apply-session.ts'
+import { openOwnTab, reclaimOwnTab, closeOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
 import { getCurrentConfig } from '../config/current.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, applications, type RecordedAnswer, type AnswerSource } from '../db/schema.ts'
-import { loadResume, loadProfile, saveLearnedAnswer } from '../profile/loader.ts'
+import { loadProfile, saveLearnedAnswer } from '../profile/loader.ts'
 import { findLearnedAnswer } from '../profile/answer-matching.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
 import { waitForAnswer } from '../state/prompt-channel.ts'
 import { recordEasyApplyResult } from '../notify/summary-aggregator.ts'
+import { summarizeError } from '../utils/error-summary.ts'
 import { noOpBrowserContextProcessor } from './no-op-browser-context-processor.ts'
+import { buildApplyInstructions } from '../prompts/easy-apply-agent.prompt.ts'
 import type { AppConfig } from '../config/schema.ts'
 import type { TabId } from '../state/types.ts'
 
@@ -23,17 +27,30 @@ const EASY_TAB: TabId = 'easy'
 const SCREENSHOT_DIR = './data/screenshots'
 
 let sharedBrowser: AgentBrowser | null = null
+let sharedBrowserCdpUrl: string | null = null
 
-function getEasyApplyBrowser(): AgentBrowser {
-  if (!sharedBrowser) {
+/** Launches (on first call) or reuses easy-apply's own dedicated browser —
+ * see easy-apply-session.ts for why this is a separate Chrome process rather
+ * than sharing the bootstrap browser with search/career-scan. Async because
+ * that launch is async; returns the cdpUrl alongside the AgentBrowser since
+ * tab-guard.ts's reclaim/open calls need it (to bring the right browser's tab
+ * to the front — see tab-focus.ts). */
+async function getEasyApplyBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: string }> {
+  if (!sharedBrowser || !sharedBrowserCdpUrl) {
+    const cdpUrl = await getEasyApplyCdpUrl()
     sharedBrowser = new AgentBrowser({
-      cdpUrl: getSharedCdpUrl(),
+      cdpUrl,
       scope: 'shared',
       headless: false,
-      excludeTools: ['browser_screenshot'],
+      // browser_tabs is deliberately withheld — this agent's tab is opened,
+      // reasserted, and closed entirely by code (see tab-guard.ts) so the LLM
+      // never opens/switches/closes tabs itself, which is what let it land in
+      // the search agent's tab back when this browser was shared with it.
+      excludeTools: ['browser_screenshot', 'browser_tabs'],
     })
+    sharedBrowserCdpUrl = cdpUrl
   }
-  return sharedBrowser
+  return { browser: sharedBrowser, cdpUrl: sharedBrowserCdpUrl }
 }
 
 export interface JobRecord {
@@ -116,7 +133,10 @@ async function writeFailedApplication(
     answers,
   })
   await db.update(jobs).set({ status: 'failed', updatedAt: new Date() }).where(eq(jobs.id, job.id))
-  pushLog(EASY_TAB, `Failed: ${job.title} @ ${job.company} (${job.applyUrl}) — ${error}`)
+  // Full error (may be a multi-line Playwright message) is kept in the DB
+  // above; the TUI log line gets the one-line summary so it doesn't break the
+  // LogPanel's layout — see error-summary.ts.
+  pushLog(EASY_TAB, `Failed: ${job.title} @ ${job.company} (id ${job.id}) — ${summarizeError(error)}`)
   recordEasyApplyResult(false)
 }
 
@@ -198,39 +218,6 @@ export function createReportSubmissionTool(job: JobRecord, browser: AgentBrowser
   })
 }
 
-async function buildApplyInstructions(config: AppConfig, job: JobRecord): Promise<string> {
-  const resume = await loadResume(config.profileFiles.resume)
-  const profile = await loadProfile(config.profileFiles.profile)
-
-  return `
-You are filling out a LinkedIn Easy Apply form in a real, already-logged-in browser.
-
-Job: ${job.title} @ ${job.company}
-Apply URL: ${job.applyUrl}
-
-Candidate resume:
-${resume}
-
-Candidate profile (structured):
-${JSON.stringify(profile, null, 2)}
-
-Steps:
-1. Open the apply URL and click "Easy Apply".
-2. Step through the form. For each field/question, resolve it in this order:
-   a. If it maps directly to a structured profile field above (contact info, work authorization, salary expectation, years of experience, links), use that value directly.
-   b. Otherwise, call lookup-learned-answer with the exact on-page question text. If found is true, use that answer.
-   c. Otherwise, if you can confidently infer the answer from the resume/profile content, answer it yourself.
-   d. Otherwise — a genuine unknown — call ask-human-and-remember with the question, then use the returned answer.
-   e. Regardless of which path (a-d) you used, call record-answer with the question, the answer you used, and which path resolved it (source: "profile", "learned", "inferred", or "human"). This is mandatory for EVERY field — it is the only record of what was actually submitted, for later human review. Do this before moving to the next field.
-3. If the form has a resume step, LinkedIn Easy Apply reuses a resume already uploaded to the candidate's LinkedIn account — it will be pre-selected automatically. Just confirm/continue past that step; do not try to upload a file. Only if the step shows no resume at all and forces a fresh upload with no way to proceed, call ask-human-and-remember asking the human to attach one manually in the visible browser, then continue once they confirm.
-4. Submit the application once all steps are complete.
-5. Call report-submission with success: true after a successful submission. If you get stuck in a way you cannot resolve, call it with success: false and one of:
-   - reason: "missing_info", question: "<the exact on-page question text>" — only if you truly could not get an answer for a specific required field (e.g. ask-human-and-remember's answer still didn't satisfy the form's validation). The app asks the human that one question immediately and retries this application right away — no separate command needed.
-   - reason: "blocked" (or omit reason) — for anything else: broken page, unexpected error, application form crashed. This is not auto-retryable, so only use "missing_info" when you can name the exact question.
-   Call report-submission exactly once, at the very end.
-`.trim()
-}
-
 export async function processEasyApplyJob(jobId: string): Promise<void> {
   const db = getDb()
   const rows = await db.select().from(jobs).where(eq(jobs.id, jobId))
@@ -249,8 +236,35 @@ export async function processEasyApplyJob(jobId: string): Promise<void> {
   const config = getCurrentConfig()
 
   const jobRecord: JobRecord = { id: job.id, title: job.title, company: job.company, applyUrl: job.applyUrl }
-  const browser = getEasyApplyBrowser()
+  const { browser, cdpUrl } = await getEasyApplyBrowser()
 
+  // Opened by code, not the LLM (see tab-guard.ts) — this is the one tab this
+  // job's agent is allowed to act on, reused across every retry attempt below,
+  // and closed once at the very end regardless of outcome.
+  let ownTab: OwnedTab
+  try {
+    ownTab = await openOwnTab(browser, cdpUrl, jobRecord.applyUrl, `/jobs/view/${jobRecord.id}`)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await writeFailedApplication(jobRecord, `Failed to open apply tab: ${message}`, 'blocked', null, [])
+    return
+  }
+
+  try {
+    await processEasyApplyJobInTab(job, jobRecord, config, browser, cdpUrl, ownTab)
+  } finally {
+    await closeOwnTab(browser, ownTab)
+  }
+}
+
+async function processEasyApplyJobInTab(
+  job: typeof jobs.$inferSelect,
+  jobRecord: JobRecord,
+  config: AppConfig,
+  browser: AgentBrowser,
+  cdpUrl: string,
+  ownTab: OwnedTab,
+): Promise<void> {
   // Bounded so a job that keeps needing new info can't loop forever — after
   // this many "ask human, retry" rounds it's written as failed instead of
   // retried again. A genuinely blocked/technical failure never loops at all,
@@ -277,6 +291,11 @@ export async function processEasyApplyJob(jobId: string): Promise<void> {
           reportSubmission: createReportSubmissionTool(jobRecord, browser, ctx),
         },
       })
+      // Agent defaults to Mastra's ConsoleLogger, which writes raw (ANSI-colored)
+      // errors straight to stdout — corrupts the opentui TUI frame on any tool
+      // error (e.g. a Playwright navigation timeout). Silence it; failures are
+      // already surfaced via pushLog/logger.error at the call sites below.
+      agent.__setLogger(noopLogger)
 
       pushLog(
         EASY_TAB,
@@ -284,6 +303,11 @@ export async function processEasyApplyJob(jobId: string): Promise<void> {
           ? `Opening application: ${job.title} @ ${job.company}`
           : `Retrying application (attempt ${attempt}/${MAX_ATTEMPTS}): ${job.title} @ ${job.company}`,
       )
+      // Close the gap between opening/reopening this tab and the agent's first
+      // action — onStepFinish below only guards between steps, not before the
+      // very first one.
+      await reclaimOwnTab(browser, cdpUrl, ownTab)
+
       // Mastra's Agent.generate defaults maxSteps to 5 tool-call steps total — a
       // real multi-field application (open, fill several fields, maybe multiple
       // Easy Apply pages, report-submission) blows past that easily, so without
@@ -293,7 +317,13 @@ export async function processEasyApplyJob(jobId: string): Promise<void> {
       // stuck agent (e.g. repeatedly retrying the same failed click) — the BullMQ
       // worker (concurrency: 1) has no job timeout, so a runaway loop would burn
       // tokens and block every other queued application indefinitely otherwise.
-      await agent.generate(`Apply to this job now. Job detail/apply URL: ${jobRecord.applyUrl}`, { maxSteps: 150 })
+      await agent.generate(`Apply to this job now. Job detail/apply URL: ${jobRecord.applyUrl}`, {
+        maxSteps: 150,
+        // The search agent (or a future job's own tab-open) can silently steal
+        // this agent's "active tab" pointer the instant it opens a tab anywhere
+        // in the shared browser — see tab-guard.ts. Reclaim before every step.
+        onStepFinish: () => reclaimOwnTab(browser, cdpUrl, ownTab),
+      })
     } catch (err) {
       if (!ctx.reported) {
         const message = err instanceof Error ? err.message : String(err)

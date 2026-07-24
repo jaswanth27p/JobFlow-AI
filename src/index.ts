@@ -4,6 +4,7 @@ import { setCurrentConfig } from './config/current.ts'
 import { loadResume, loadProfile } from './profile/loader.ts'
 import { getDb, closeDb } from './db/index.ts'
 import { launchBootstrapBrowser, openLoginTabs, shutdownBrowserServer } from './browser/session.ts'
+import { shutdownEasyApplyBrowser } from './browser/easy-apply-session.ts'
 import { startLoginAutoVerify, stopLoginAutoVerify } from './browser/verify-login.ts'
 import { initAppState } from './state/app-state.ts'
 import { registerBuiltinCommands } from './commands/index.ts'
@@ -51,6 +52,9 @@ async function cleanup() {
   await stopCareerCheckAndWait()
   await stopEasyApplyWorker()
   await closeApplyQueues()
+  // easy-apply's own dedicated browser (see easy-apply-session.ts) — a no-op
+  // if it was never launched this session (lazy, only on first easy-apply use).
+  await shutdownEasyApplyBrowser()
   await shutdownBrowserServer()
   await closeDb()
 }
@@ -104,7 +108,6 @@ async function main() {
   initAppState({
     concurrency: config.concurrency,
     model: config.model,
-    maxJobsPerRun: config.search.maxJobsPerRun,
     minNavDelayMs: config.search.minNavDelayMs,
     maxNavDelayMs: config.search.maxNavDelayMs,
     loopCooldownMs: config.search.loopCooldownMs,
@@ -137,7 +140,7 @@ async function main() {
 
 main().catch(async (err) => {
   logger.error(err)
-  console.error(err)
   await cleanup()
+  console.error(err)
   process.exit(1)
 })

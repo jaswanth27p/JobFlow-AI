@@ -5,7 +5,7 @@ import { initAppState, appState, setSessionStatus, pushLog } from '../../../src/
 
 beforeEach(() => {
   clearRegistryForTest()
-  initAppState({ concurrency: 1, model: 'test', maxJobsPerRun: 25, minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+  initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
   registerCommand({ name: 'help', scope: 'global', description: '', run: () => {} })
   registerCommand({
     name: 'search-urls',

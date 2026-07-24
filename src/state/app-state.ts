@@ -1,5 +1,6 @@
 import { createStore, produce } from 'solid-js/store'
 import { TAB_IDS, MAX_LOGS_PER_TAB, type AppState, type TabId, type AgentStatus, type Settings } from './types.ts'
+import { sanitizeLogLine } from '../utils/error-summary.ts'
 
 function emptyTabState() {
   return { status: 'idle' as AgentStatus, step: null, logs: [], needsInputQuestion: null }
@@ -20,7 +21,7 @@ function initialState(settings: Settings): AppState {
 }
 
 export let [appState, setAppStateInternal] = createStore<AppState>(
-  initialState({ concurrency: 1, model: '', maxJobsPerRun: 25, minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300_000 }),
+  initialState({ concurrency: 1, model: '', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300_000 }),
 )
 
 export function initAppState(settings: Settings): void {
@@ -45,7 +46,7 @@ export function pushLog(tab: TabId, line: string): void {
     tab,
     'logs',
     produce((logs) => {
-      logs.push(line)
+      logs.push(sanitizeLogLine(line))
       if (logs.length > MAX_LOGS_PER_TAB) logs.splice(0, logs.length - MAX_LOGS_PER_TAB)
     }),
   )

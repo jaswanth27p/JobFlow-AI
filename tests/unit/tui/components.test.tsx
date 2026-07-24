@@ -5,7 +5,7 @@ import { Sidebar } from '../../../src/tui/components/Sidebar.tsx'
 import { LogPanel } from '../../../src/tui/components/LogPanel.tsx'
 
 beforeEach(() => {
-  initAppState({ concurrency: 1, model: 'test', maxJobsPerRun: 25, minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+  initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
 })
 
 describe('TUI components', () => {

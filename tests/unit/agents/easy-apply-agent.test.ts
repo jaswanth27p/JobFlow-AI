@@ -11,7 +11,7 @@ import {
   type SubmissionContext,
 } from '../../../src/agents/easy-apply-agent.ts'
 
-initAppState({ concurrency: 1, model: 'test', maxJobsPerRun: 25, minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
 
 // This file exercises createReportSubmissionTool/processEasyApplyJob's real
 // report-submission path unmocked, which now calls the real

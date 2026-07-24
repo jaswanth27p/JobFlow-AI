@@ -3,6 +3,7 @@ import { appState, pushLog } from '../state/app-state.ts'
 import { runSearchUrls, isSearchRunning, stopSearchAndWait } from './search-agent.ts'
 import { startEasyApplyWorker } from '../queues/easy-apply-worker.ts'
 import { logger } from '../utils/logger.ts'
+import { summarizeError } from '../utils/error-summary.ts'
 import type { TabId } from '../state/types.ts'
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -97,7 +98,7 @@ async function runConfiguredUrls(): Promise<void> {
   try {
     await runSearchUrls(config.mustCheckUrls)
   } catch (err) {
-    pushLog(SEARCH_TAB, `Auto mode: cycle failed: ${err instanceof Error ? err.message : String(err)}`)
+    pushLog(SEARCH_TAB, `Auto mode: cycle failed: ${summarizeError(err)}`)
     logger.error({ err }, 'auto mode: cycle failed')
   }
 }

@@ -4,7 +4,7 @@ import { initAppState, setActiveTab, setSessionStatus, pushLog, appState } from 
 import { App } from '../../../src/tui/App.tsx'
 
 beforeEach(() => {
-  initAppState({ concurrency: 1, model: 'test', maxJobsPerRun: 25, minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+  initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
 })
 
 describe('App', () => {

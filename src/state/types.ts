@@ -16,8 +16,6 @@ export interface SessionStatus {
 export interface Settings {
   concurrency: number
   model: string
-  /** Max job detail pages a single search run may open (LinkedIn rate-limit guard). */
-  maxJobsPerRun: number
   /** Lower/upper bounds of the randomized pause after each browser navigation. */
   minNavDelayMs: number
   maxNavDelayMs: number

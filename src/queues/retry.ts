@@ -58,3 +58,41 @@ export async function retryWithAnswer(jobId: string, question: string, answer: s
   await db.update(jobs).set({ status: 'queued', updatedAt: new Date() }).where(eq(jobs.id, jobId))
   await enqueueApplyJob(jobId)
 }
+
+/** Plain requeue, no answer needed — for a 'blocked' failure (broken page,
+ * navigation error, anything not a specific unanswered question), the job
+ * just needs another attempt, not a saved answer. */
+export async function retryJob(jobId: string): Promise<void> {
+  const db = getDb()
+  await db.update(jobs).set({ status: 'queued', updatedAt: new Date() }).where(eq(jobs.id, jobId))
+  await enqueueApplyJob(jobId)
+}
+
+/** Requeues every currently-failed job in one go (the /retry-failed-applications
+ * command). Plain requeue like retryJob — a job that specifically needs a
+ * missing_info answer will just fail the same way again and show up here next
+ * time; use the dashboard's per-job retry-with-answer form for those instead.
+ * Returns what was requeued so the caller can report it. */
+export async function retryAllFailedJobs(): Promise<FailedApplication[]> {
+  const failed = await listFailedApplications()
+  const db = getDb()
+  for (const f of failed) {
+    await db.update(jobs).set({ status: 'queued', updatedAt: new Date() }).where(eq(jobs.id, f.jobId))
+    await enqueueApplyJob(f.jobId)
+  }
+  return failed
+}
+
+/** Manually force a job to 'applied' or 'skipped' — bypasses the queue
+ * entirely. Once set, it's no longer 'failed' so /retry-failed-applications
+ * (which only touches status: 'failed') will never pick it up again. Returns
+ * false if the job id doesn't exist. */
+export async function setJobStatus(jobId: string, status: 'applied' | 'skipped'): Promise<boolean> {
+  const db = getDb()
+  const result = await db
+    .update(jobs)
+    .set({ status, updatedAt: new Date() })
+    .where(eq(jobs.id, jobId))
+    .returning({ id: jobs.id })
+  return result.length > 0
+}

@@ -179,11 +179,19 @@ export function getBrowserServerPort(): number {
 }
 
 export async function openLoginTabs(linkedinUrl: string, gmailUrl: string): Promise<void> {
-  // tab 0: navigates the default tab the browser opens with.
+  // tab 0: navigates the default tab the browser opens with. Allowed to
+  // throw — this one's essential, nothing works without a LinkedIn tab.
   await httpGet(`/navigate?url=${encodeURIComponent(linkedinUrl)}`)
-  // tab 1: a fresh tab for Gmail. Currently vestigial — no agent reads it —
-  // kept open since /verify-login still reports Gmail's login status.
-  await httpGet(`/newtab?url=${encodeURIComponent(gmailUrl)}`)
+  // tab 1: a fresh tab for Gmail. Currently vestigial — no agent reads it,
+  // nothing gates on it (isUnlocked() checks LinkedIn only) — kept open only
+  // so /verify-login can report Gmail's login status. Best-effort: a slow or
+  // failed Gmail page load (e.g. a navigation timeout) must never take the
+  // whole app down before the TUI even mounts.
+  try {
+    await httpGet(`/newtab?url=${encodeURIComponent(gmailUrl)}`)
+  } catch (err) {
+    logger.warn({ err }, 'Could not open Gmail login tab — continuing without it (Gmail login is optional)')
+  }
 }
 
 export async function shutdownBrowserServer(): Promise<void> {

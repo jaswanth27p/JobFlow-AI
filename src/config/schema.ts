@@ -14,12 +14,19 @@ export const appConfigSchema = z.object({
     resume: z.string(),
     profile: z.string(),
   }),
+  /** Free-text appended to the end of each agent's built prompt (see
+   * src/prompts/) — a place for user-specific rules without editing the
+   * prompt files themselves. Empty string means no extra block is added. */
+  extraPrompts: z.object({
+    search: z.string().default(''),
+    easyApply: z.string().default(''),
+  }).default({ search: '', easyApply: '' }),
   search: z.object({
-    // Rate-limit guards to avoid tripping LinkedIn's automation defenses:
-    // - maxJobsPerRun caps how many job detail pages a single scan run opens.
-    // - min/maxNavDelayMs bracket a randomized human-like pause inserted (in
-    //   code, not left to the model) after every browser navigation.
-    maxJobsPerRun: z.number().int().positive().default(25),
+    // Rate-limit guard to avoid tripping LinkedIn's automation defenses:
+    // min/maxNavDelayMs bracket a randomized human-like pause inserted (in
+    // code, not left to the model) after every browser navigation. There is
+    // no cap on jobs scanned per run — see check-page-relevance-ratio in
+    // search-agent.ts for the per-URL pagination stop condition instead.
     minNavDelayMs: z.number().int().min(0).default(3000),
     maxNavDelayMs: z.number().int().min(0).default(8000),
     /** Minimum pause between full /auto-on loop cycles (re-scanning the same
@@ -27,7 +34,7 @@ export const appConfigSchema = z.object({
      * results back-to-back nonstop — a real LinkedIn rate-limit/ban risk,
      * unlike /auto-on interval which already waits the full interval. */
     loopCooldownMs: z.number().int().min(60_000).default(300_000),
-  }).default({ maxJobsPerRun: 25, minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300_000 }),
+  }).default({ minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300_000 }),
 })
 
 export type AppConfig = z.infer<typeof appConfigSchema>

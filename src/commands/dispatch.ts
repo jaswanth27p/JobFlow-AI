@@ -1,5 +1,6 @@
 import { getCommand } from './registry.ts'
 import { appState, pushLog, isUnlocked } from '../state/app-state.ts'
+import { summarizeError } from '../utils/error-summary.ts'
 
 export async function dispatchCommand(input: string): Promise<void> {
   const trimmed = input.trim()
@@ -25,6 +26,6 @@ export async function dispatchCommand(input: string): Promise<void> {
   try {
     await command.run({ args, rawArgs: args.join(' ') })
   } catch (err) {
-    pushLog(appState.activeTab, `/${name} failed: ${err instanceof Error ? err.message : String(err)}`)
+    pushLog(appState.activeTab, `/${name} failed: ${summarizeError(err)}`)
   }
 }

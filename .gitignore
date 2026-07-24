@@ -7,3 +7,6 @@ data/
 docs/
 resume.md
 profile.json
+linkedin-auto.config.ts
+skills-lock.json
+.agents

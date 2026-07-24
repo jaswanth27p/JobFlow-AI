@@ -165,6 +165,17 @@ const server = createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: true }))
     }
 
+    if (url.pathname === '/cookies') {
+      // Live cookies straight from this browser's current session — unlike
+      // /state, this does NOT write to STORAGE_STATE_PATH. Used to seed a
+      // second, independent browser instance (see easy-apply-session.ts) with
+      // whatever login this one has RIGHT NOW, without waiting for a clean
+      // shutdown to persist it to disk first.
+      const cookies = await browser.cookies()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({ cookies }))
+    }
+
     if (url.pathname === '/check-selector') {
       const tabIndex = parseInt(url.searchParams.get('tab') || '0', 10)
       const selector = url.searchParams.get('selector') || ''

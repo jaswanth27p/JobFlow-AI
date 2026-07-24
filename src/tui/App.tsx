@@ -8,6 +8,8 @@ import { InputBar, SuggestionBox, suggestions, selectedSuggestionIndex, setSelec
 import { ToastOverlay, showToast } from './components/Toast.tsx'
 import { TabPickerOverlay, tabPickerOpen, closeTabPicker, moveTabPicker, confirmTabPicker } from './components/TabPicker.tsx'
 import { ThemePickerOverlay, themePickerOpen, closeThemePicker, moveThemePicker, confirmThemePicker } from './components/ThemePicker.tsx'
+import { QuitConfirmOverlay, quitConfirmOpen, openQuitConfirm, closeQuitConfirm, confirmQuit } from './components/QuitConfirm.tsx'
+import { OptionPickerOverlay, optionPickerOpen, closeOptionPicker, moveOptionPicker, confirmOptionPicker } from './components/OptionPicker.tsx'
 import { theme } from './theme/current.ts'
 
 const NARROW_WIDTH_THRESHOLD = 70
@@ -45,16 +47,51 @@ export function App() {
   })
 
   useKeyboard((key) => {
-    // Ctrl+C copies the current selection (renderer's exitOnCtrlC is off, so
-    // it no longer kills the app). Only swallow the key when there's actually
-    // something selected to copy.
+    // Ctrl+C copies the current selection when there is one (renderer's
+    // exitOnCtrlC is off, so it no longer kills the app on its own). With
+    // nothing selected, it's the terminal-native "I want to quit" gesture —
+    // instead of silently doing nothing, open a confirm dialog rather than
+    // exiting immediately, so it can't be hit by accident mid-run.
     if (key.ctrl && key.name === 'c') {
-      if (copySelection()) key.preventDefault()
+      key.preventDefault()
+      if (!copySelection() && !quitConfirmOpen()) openQuitConfirm()
       return
     }
 
     if (key.ctrl && key.name === 'q') {
       dispatchCommand('/exit')
+      return
+    }
+
+    // Quit-confirm modal takes priority over everything else while open.
+    if (quitConfirmOpen()) {
+      if (key.name === 'return' || key.name === 'enter' || key.name === 'kpenter' || key.sequence === 'y') {
+        key.preventDefault()
+        confirmQuit()
+      } else if (key.name === 'escape' || key.sequence === 'n') {
+        key.preventDefault()
+        closeQuitConfirm()
+      }
+      return
+    }
+
+    // Generic option picker (auto-on mode/duration, /set key, /mark-* job,
+    // ...) — same priority tier as the theme/tab pickers, only one popup at a
+    // time.
+    if (optionPickerOpen()) {
+      if (key.name === 'up') {
+        key.preventDefault()
+        moveOptionPicker(-1)
+      } else if (key.name === 'down') {
+        key.preventDefault()
+        moveOptionPicker(1)
+      } else if (key.name === 'return' || key.name === 'enter' || key.name === 'kpenter') {
+        key.preventDefault()
+        confirmOptionPicker()
+      } else if (key.name === 'escape') {
+        key.preventDefault()
+        closeOptionPicker()
+      }
       return
     }
 
@@ -177,6 +214,8 @@ export function App() {
       <ToastOverlay />
       <TabPickerOverlay />
       <ThemePickerOverlay />
+      <OptionPickerOverlay />
+      <QuitConfirmOverlay />
     </box>
   )
 }

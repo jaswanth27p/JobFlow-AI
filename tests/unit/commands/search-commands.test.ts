@@ -1,8 +1,9 @@
-import { describe, test, expect, beforeEach } from 'bun:test'
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { clearRegistryForTest, getCommand } from '../../../src/commands/registry.ts'
 import { registerSearchCommands } from '../../../src/commands/search-commands.ts'
 import { initAppState, appState } from '../../../src/state/app-state.ts'
 import { setCurrentConfig } from '../../../src/config/current.ts'
+import { optionPickerOpen, closeOptionPicker } from '../../../src/tui/components/OptionPicker.tsx'
 import type { AppConfig } from '../../../src/config/schema.ts'
 
 function makeConfig(): AppConfig {
@@ -13,15 +14,24 @@ function makeConfig(): AppConfig {
     model: 'test',
     notifySummaryIntervalMinutes: 30,
     profileFiles: { resume: './resume.md', profile: './profile.json' },
-    search: { maxJobsPerRun: 25, minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 },
+    extraPrompts: { search: '', easyApply: '' },
+    search: { minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 },
   }
 }
 
 beforeEach(() => {
   clearRegistryForTest()
-  initAppState({ concurrency: 1, model: 'test', maxJobsPerRun: 25, minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+  initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
   setCurrentConfig(makeConfig())
   registerSearchCommands()
+})
+
+// OptionPicker's open/selected state is a module-level signal (like the theme
+// and tab pickers) — it survives across test files in the same bun test
+// process, so a picker left open here would swallow keystrokes in unrelated
+// TUI tests that run later. Always close it.
+afterEach(() => {
+  closeOptionPicker()
 })
 
 describe('search commands', () => {
@@ -47,9 +57,9 @@ describe('search commands', () => {
     expect(appState.tabs.search.logs).toContain('Auto mode is not on.')
   })
 
-  test('/auto-on with no mode arg logs usage and does not start anything', async () => {
+  test('/auto-on with no mode arg opens the mode picker instead of starting anything', async () => {
     await getCommand('auto-on')!.run({ args: [], rawArgs: '' })
-    expect(appState.tabs.search.logs).toContain('Usage: /auto-on loop | /auto-on interval <duration>')
+    expect(optionPickerOpen()).toBe(true)
   })
 
   test('/auto-on with an unrecognized mode logs usage', async () => {
@@ -57,9 +67,9 @@ describe('search commands', () => {
     expect(appState.tabs.search.logs).toContain('Usage: /auto-on loop | /auto-on interval <duration>')
   })
 
-  test('/auto-on interval with no duration logs usage', async () => {
+  test('/auto-on interval with no duration opens the duration picker', async () => {
     await getCommand('auto-on')!.run({ args: ['interval'], rawArgs: 'interval' })
-    expect(appState.tabs.search.logs).toContain('Usage: /auto-on interval <duration> (e.g. 1h, 3h, 90m)')
+    expect(optionPickerOpen()).toBe(true)
   })
 
   test('/auto-on interval with an invalid duration logs a rejection', async () => {

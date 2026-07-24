@@ -6,6 +6,8 @@ import { getBrowserServerPort } from '../browser/session.ts'
 import { verifyLogin } from '../browser/verify-login.ts'
 import { openTabPicker } from '../tui/components/TabPicker.tsx'
 import { openThemePicker } from '../tui/components/ThemePicker.tsx'
+import { openOptionPicker } from '../tui/components/OptionPicker.tsx'
+import { prefillInput } from '../tui/components/InputBar.tsx'
 import { setTheme } from '../tui/theme/current.ts'
 import { hasTheme } from '../tui/theme/index.ts'
 import { persistThemeName } from '../tui/theme/persist.ts'
@@ -63,16 +65,34 @@ export function registerGlobalCommands(): void {
   registerCommand({
     name: 'set',
     scope: 'global',
-    description: '/set <concurrency|model|maxJobsPerRun|minNavDelayMs|maxNavDelayMs|loopCooldownMs> <value>',
+    description: '/set <concurrency|model|minNavDelayMs|maxNavDelayMs|loopCooldownMs> <value>',
     run: (ctx) => {
       const [key, ...rest] = ctx.args
       const value = rest.join(' ')
+
+      // No key given at all — let the user pick which setting instead of
+      // just printing a usage line. The value still isn't a bounded set of
+      // options, so hand off to the input bar prefilled with "/set <key> "
+      // for them to type it, rather than a second picker.
+      if (!key) {
+        openOptionPicker({
+          title: 'Change a setting',
+          items: [
+            { label: 'concurrency', value: 'concurrency', hint: 'parallel easy-apply jobs' },
+            { label: 'model', value: 'model', hint: 'LLM model id' },
+            { label: 'minNavDelayMs', value: 'minNavDelayMs', hint: 'min pause after navigation' },
+            { label: 'maxNavDelayMs', value: 'maxNavDelayMs', hint: 'max pause after navigation' },
+            { label: 'loopCooldownMs', value: 'loopCooldownMs', hint: 'pause between /auto-on loop cycles' },
+          ],
+          onConfirm: (chosenKey) => prefillInput(`/set ${chosenKey} `),
+        })
+        return
+      }
 
       // Every numeric setting is validated here — an unchecked Number() let
       // `/set concurrency abc` poison the live settings with NaN.
       const numericRules: Partial<Record<keyof Settings, { min: number; integer: boolean; max?: number }>> = {
         concurrency: { min: 1, integer: true },
-        maxJobsPerRun: { min: 1, integer: true },
         minNavDelayMs: { min: 0, integer: true },
         maxNavDelayMs: { min: 0, integer: true },
         loopCooldownMs: { min: 60_000, integer: true },
@@ -102,7 +122,7 @@ export function registerGlobalCommands(): void {
       } else {
         pushLog(
           appState.activeTab,
-          `Unknown setting: ${key}. Use concurrency, model, maxJobsPerRun, minNavDelayMs, maxNavDelayMs, or loopCooldownMs.`,
+          `Unknown setting: ${key}. Use concurrency, model, minNavDelayMs, maxNavDelayMs, or loopCooldownMs.`,
         )
         return
       }

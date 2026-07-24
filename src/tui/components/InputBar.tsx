@@ -8,6 +8,17 @@ import type { Command } from '../../commands/types.ts'
 
 export let [suggestions, setSuggestions] = createSignal<Command[]>([])
 export let [selectedSuggestionIndex, setSelectedSuggestionIndex] = createSignal(-1)
+export const [inputValue, setInputValue] = createSignal('')
+
+/** Prefills the input bar and re-runs command-suggestion filtering on it, as
+ * if the user had typed it — used by pickers that resolve one argument (e.g.
+ * /set's setting-key picker) and hand off to the input bar for the rest
+ * (a value), which isn't itself a bounded set of options to pick from. */
+export function prefillInput(text: string): void {
+  setInputValue(text)
+  setSuggestions(filterCommands(text))
+  setSelectedSuggestionIndex(-1)
+}
 
 export function dismissSuggestions() {
   setSuggestions([])
@@ -93,12 +104,11 @@ export function SuggestionBox() {
 }
 
 export function InputBar(props: { onSubmit: (value: string) => void; disabled?: boolean }) {
-  const [value, setValue] = createSignal('')
   const pendingQuestion = createMemo(() => appState.tabs[appState.activeTab].needsInputQuestion)
   const barColor = () => pendingQuestion() ? theme().warning : props.disabled ? theme().borderActive : theme().accent
 
   const handleInput = (v: string) => {
-    setValue(v)
+    setInputValue(v)
     if (pendingQuestion()) {
       setSuggestions([])
       return
@@ -115,7 +125,7 @@ export function InputBar(props: { onSubmit: (value: string) => void; disabled?: 
       <text fg={barColor()}>{pendingQuestion() ? 'Q' : props.disabled ? '…' : '/'}</text>
       <text fg={theme().textMuted}> </text>
       <input
-        value={value()}
+        value={inputValue()}
         placeholder={
           pendingQuestion()
             ? `? ${pendingQuestion()}`
@@ -125,7 +135,7 @@ export function InputBar(props: { onSubmit: (value: string) => void; disabled?: 
         }
         onInput={handleInput}
         onSubmit={() => {
-          const v = value().trim()
+          const v = inputValue().trim()
           if (!v) return
           const question = pendingQuestion()
           if (question) {
@@ -133,7 +143,7 @@ export function InputBar(props: { onSubmit: (value: string) => void; disabled?: 
           } else {
             props.onSubmit(v)
           }
-          setValue('')
+          setInputValue('')
           dismissSuggestions()
         }}
       />

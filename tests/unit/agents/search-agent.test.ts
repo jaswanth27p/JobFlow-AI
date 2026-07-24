@@ -3,8 +3,8 @@ import { writeFile, rm } from 'node:fs/promises'
 import {
   computeMidPageContinueDecision,
   computeRelevanceContinueDecision,
-  buildScanInstructions,
 } from '../../../src/agents/search-agent.ts'
+import { buildScanInstructions } from '../../../src/prompts/search-agent.prompt.ts'
 import { setCurrentConfig } from '../../../src/config/current.ts'
 import { loadConfig } from '../../../src/config/loader.ts'
 

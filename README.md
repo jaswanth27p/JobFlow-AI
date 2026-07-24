@@ -74,20 +74,17 @@ For the full technical design (and where the real implementation differs from th
    bun run db:push
    ```
 
-5. **Set up your resume and profile**
+5. **Set up your personal config files**
 
    ```bash
    cp resume.example.md resume.md
    cp profile.example.json profile.json
+   cp linkedin-auto.config.example.ts linkedin-auto.config.ts
    ```
 
-   Edit both with your real information (see [Configuration](#configuration) below for what each field means). **Both files are gitignored** — they hold personal data and are never meant to be committed.
+   Edit all three with your real information — resume, structured profile facts, and what to search for/skip (see [Configuration](#configuration) below for what each field means). **All three are gitignored** — they hold personal data (and, for the config, your own search URLs/filtering rules) and are never meant to be committed. Only the `*.example.*` versions are tracked in git.
 
-6. **Configure what to search for**
-
-   Edit `linkedin-auto.config.ts` (see [Configuration](#configuration) below).
-
-7. **Run it**
+6. **Run it**
 
    ```bash
    bun run dev
@@ -99,9 +96,11 @@ For the full technical design (and where the real implementation differs from th
 
 ### `linkedin-auto.config.ts`
 
+Copied from `linkedin-auto.config.example.ts` (step 5 above) — this is your personal, gitignored copy.
+
 ```ts
 export default {
-  mustCheckUrls: [                    // LinkedIn search-results URLs to run with /search-urls or auto mode.
+  mustCheckUrls: [                    // LinkedIn search-results URLs to run with /search-urls or /auto-on.
     'https://www.linkedin.com/jobs/search/?f_TPR=r86400&keywords=software%20engineer',
   ],
   requirements: `                     // Free text — used ONLY by the career-page scan agent
@@ -114,16 +113,24 @@ export default {
     resume: './resume.md',
     profile: './profile.json',
   },
+  extraPrompts: {                     // Free text appended to the end of the built prompt for each
+    search: '',                       // agent (src/prompts/) — one-off rules ("skip company X") without
+    easyApply: '',                    // editing the prompt files themselves. '' means nothing added.
+  },
   model: 'opencode-go/deepseek-v4-flash',  // 'provider/model' — see Model notes below.
+  notifySummaryIntervalMinutes: 30,   // Batches external-job-found / easy-apply-result counts into one
+                                       // desktop notification every N minutes, instead of one per event.
   search: {
-    maxJobsPerRun: 25,                // Cap on job detail opens per search run (LinkedIn rate-limit guard).
     minNavDelayMs: 3000,              // Randomized human-like pause after each browser navigation…
-    maxNavDelayMs: 8000,              // …between these two bounds.
+    maxNavDelayMs: 8000,              // …between these two bounds (LinkedIn rate-limit guard).
+    loopCooldownMs: 300000,           // Minimum pause between full /auto-on loop cycles.
   },
 }
 ```
 
-`model` and every `search.*` number can also be changed at runtime without restarting, via `/set model <name>`, `/set maxJobsPerRun <n>`, etc.
+There is no cap on jobs scanned per run — a search URL stops being paginated when its result relevance ratio drops too low or it runs out of pages, not after a fixed count.
+
+`model` and every `search.*` number can also be changed at runtime without restarting, via `/set model <name>`, `/set minNavDelayMs <ms>`, etc.
 
 ### `profile.json`
 
@@ -159,7 +166,7 @@ Once `/verify-login` succeeds, every command below is available. Commands are sc
 | `/verify-login` | global | Check LinkedIn/Gmail login status; unlocks the app once LinkedIn passes |
 | `/tab [search\|easy\|external\|careers]` | global | Switch the active tab (no arg opens a picker) |
 | `/theme [name]` | global | Switch color theme (no arg opens a picker) |
-| `/set <setting> <value>` | global | Change a runtime setting (`concurrency`, `model`, `maxJobsPerRun`, `minNavDelayMs`, `maxNavDelayMs`) without restarting |
+| `/set <setting> <value>` | global | Change a runtime setting (`concurrency`, `model`, `minNavDelayMs`, `maxNavDelayMs`, `loopCooldownMs`) without restarting |
 | `/help` | global | List commands available on the current tab |
 | `/exit` | global | Close the browser and quit (`Ctrl+Q` also works) |
 | `/search-urls` | search | Run the URLs from `linkedin-auto.config.ts`'s `mustCheckUrls` |
@@ -184,7 +191,7 @@ A small review dashboard also runs at `http://127.0.0.1:4870` (loopback only; po
 
 - Your LinkedIn password is never read, stored, or requested by this app. Login happens by hand, in a real, visible browser window.
 - `resume.md` and `profile.json` are sent to the configured LLM provider (OpenCode Zen) as context for every agent call — review OpenCode's data handling policy if that matters for your use case.
-- `resume.md`, `profile.json`, and everything under `data/` (logs, browser session state, application screenshots) are gitignored and stay local to your machine.
+- `resume.md`, `profile.json`, `linkedin-auto.config.ts`, and everything under `data/` (logs, browser session state, application screenshots) are gitignored and stay local to your machine.
 - Application screenshots are saved to `data/screenshots/` as proof of what was actually submitted.
 
 ## Development

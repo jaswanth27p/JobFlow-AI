@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { eq, desc, gte, sql } from 'drizzle-orm'
+import { eq, desc, gte, sql, inArray } from 'drizzle-orm'
 import { getDb } from '../db/index.ts'
 import { jobs, applications, searchRuns, answerReviews, careerPages, careerPageScans } from '../db/schema.ts'
 import { getApplyQueueCounts } from '../queues/apply-queues.ts'
 import { getCurrentConfig } from '../config/current.ts'
 import { saveLearnedAnswer } from '../profile/loader.ts'
-import { retryWithAnswer } from '../queues/retry.ts'
+import { retryWithAnswer, retryJob } from '../queues/retry.ts'
 import { groupAnswersByQuestion, type ApplicationAnswers } from './review-data.ts'
 import { logger } from '../utils/logger.ts'
 import { filterUnreviewed, clusterQuestions, type ReviewedPair, type QuestionCluster } from './review-cluster.ts'
@@ -19,6 +19,86 @@ function startOfToday(): Date {
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+/**
+ * Search box + optional status dropdown, and the click-to-sort/filter script
+ * that goes with them — same behavior /applications already had, factored out
+ * so /external-jobs and /career-pages get it too instead of being static
+ * tables. `th` elements that should sort need `data-sort` set in the caller's
+ * markup; columns holding only a link (Apply URL, Source URL, ...) are
+ * conventionally left out since sorting by link text isn't useful.
+ */
+function sortableFilterableTable(opts: {
+  tableId: string
+  statusColIndex?: number
+  statusOptions?: string[]
+  /** Pre-selects this status in the dropdown on page load (still overridable
+   * by the user via "All statuses") — e.g. external jobs default to hiding
+   * ones already marked applied. */
+  defaultStatusValue?: string
+}): { toolbarHtml: string; scriptHtml: string } {
+  const hasStatusFilter = opts.statusColIndex !== undefined && opts.statusOptions !== undefined
+
+  const toolbarHtml = `
+    <div class="table-toolbar">
+      ${
+        hasStatusFilter
+          ? `<select id="${opts.tableId}StatusFilter">
+               <option value="">All statuses</option>
+               ${opts.statusOptions!
+                 .map(
+                   (s) =>
+                     `<option value="${escapeHtml(s)}"${s === opts.defaultStatusValue ? ' selected' : ''}>${escapeHtml(s)}</option>`,
+                 )
+                 .join('')}
+             </select>`
+          : ''
+      }
+      <input type="text" id="${opts.tableId}Search" placeholder="Search..." />
+    </div>`
+
+  const scriptHtml = `
+    <script>
+      (function () {
+        var table = document.getElementById('${opts.tableId}');
+        var tbody = table.tBodies[0];
+        var search = document.getElementById('${opts.tableId}Search');
+        ${hasStatusFilter ? `var statusFilter = document.getElementById('${opts.tableId}StatusFilter');` : ''}
+        var statusCol = ${opts.statusColIndex ?? -1};
+
+        Array.prototype.forEach.call(table.tHead.rows[0].cells, function (th, idx) {
+          if (!th.hasAttribute('data-sort')) return;
+          th.style.cursor = 'pointer';
+          var dir = 1;
+          th.addEventListener('click', function () {
+            var rows = Array.prototype.slice.call(tbody.rows);
+            rows.sort(function (a, b) {
+              var av = a.cells[idx].innerText.trim();
+              var bv = b.cells[idx].innerText.trim();
+              return av.localeCompare(bv, undefined, { numeric: true }) * dir;
+            });
+            dir *= -1;
+            rows.forEach(function (row) { tbody.appendChild(row); });
+          });
+        });
+
+        function applyFilters() {
+          var searchVal = search.value.toLowerCase();
+          Array.prototype.forEach.call(tbody.rows, function (row) {
+            var matchesStatus = statusCol < 0 || ${hasStatusFilter ? '!statusFilter.value || row.cells[statusCol].innerText.trim() === statusFilter.value' : 'true'};
+            var matchesSearch = !searchVal || row.innerText.toLowerCase().indexOf(searchVal) !== -1;
+            row.style.display = matchesStatus && matchesSearch ? '' : 'none';
+          });
+        }
+
+        search.addEventListener('input', applyFilters);
+        ${hasStatusFilter ? `statusFilter.addEventListener('change', applyFilters);` : ''}
+        applyFilters();
+      })();
+    </script>`
+
+  return { toolbarHtml, scriptHtml }
 }
 
 function page(body: string): Response {
@@ -188,11 +268,11 @@ async function renderApplications(): Promise<Response> {
 
   const items = rows
     .map((r) => {
-      const canRetry = r.status === 'failed' && r.failureReason === 'missing_info' && r.missingInfoQuestion
+      const canRetryWithAnswer = r.status === 'failed' && r.failureReason === 'missing_info' && r.missingInfoQuestion
       const action =
         r.status !== 'failed'
           ? ''
-          : canRetry
+          : canRetryWithAnswer
             ? `<form method="post" action="/applications/retry">
                  <input type="hidden" name="jobId" value="${escapeHtml(r.jobId)}" />
                  <input type="hidden" name="question" value="${escapeHtml(r.missingInfoQuestion!)}" />
@@ -200,7 +280,11 @@ async function renderApplications(): Promise<Response> {
                  <input type="text" name="answer" placeholder="answer" required />
                  <button type="submit">Retry</button>
                </form>`
-            : `<a href="${escapeHtml(r.applyUrl)}">Apply manually</a>`
+            : `<form method="post" action="/applications/retry-job" style="display:inline">
+                 <input type="hidden" name="jobId" value="${escapeHtml(r.jobId)}" />
+                 <button type="submit">Retry</button>
+               </form>
+               <a href="${escapeHtml(r.applyUrl)}">Apply manually</a>`
 
       return `
     <tr>
@@ -227,60 +311,19 @@ async function renderApplications(): Promise<Response> {
     })
     .join('')
 
-  const APP_STATUS_COL = 11
+  const { toolbarHtml, scriptHtml } = sortableFilterableTable({
+    tableId: 'appsTable',
+    statusColIndex: 11,
+    statusOptions: ['applied', 'failed', 'needs_input'],
+  })
 
   return page(`
     <h1>Applications</h1>
-    <div class="table-toolbar">
-      <select id="statusFilter">
-        <option value="">All statuses</option>
-        <option value="applied">applied</option>
-        <option value="failed">failed</option>
-        <option value="needs_input">needs_input</option>
-      </select>
-      <input type="text" id="tableSearch" placeholder="Search..." />
-    </div>
+    ${toolbarHtml}
     <div class="table-scroll"><table id="appsTable"><thead><tr>
       <th data-sort>App ID</th><th data-sort>Job ID</th><th data-sort>Job</th><th data-sort>Company</th><th data-sort>Location</th><th data-sort>Source</th><th data-sort>Apply Type</th><th>Apply URL</th><th>Source URL</th><th data-sort>Job Status</th><th data-sort>Relevance Reason</th><th data-sort>App Status</th><th data-sort>Result</th><th data-sort>Error</th><th data-sort>Screenshot Path</th><th data-sort>Answers</th><th data-sort>Applied At</th><th data-sort>Job Updated</th><th>Action</th>
     </tr></thead><tbody>${items}</tbody></table></div>
-    <script>
-      (function () {
-        var table = document.getElementById('appsTable');
-        var tbody = table.tBodies[0];
-        var statusFilter = document.getElementById('statusFilter');
-        var search = document.getElementById('tableSearch');
-        var APP_STATUS_COL = ${APP_STATUS_COL};
-
-        Array.prototype.forEach.call(table.tHead.rows[0].cells, function (th, idx) {
-          if (!th.hasAttribute('data-sort')) return;
-          th.style.cursor = 'pointer';
-          var dir = 1;
-          th.addEventListener('click', function () {
-            var rows = Array.prototype.slice.call(tbody.rows);
-            rows.sort(function (a, b) {
-              var av = a.cells[idx].innerText.trim();
-              var bv = b.cells[idx].innerText.trim();
-              return av.localeCompare(bv, undefined, { numeric: true }) * dir;
-            });
-            dir *= -1;
-            rows.forEach(function (row) { tbody.appendChild(row); });
-          });
-        });
-
-        function applyFilters() {
-          var statusVal = statusFilter.value;
-          var searchVal = search.value.toLowerCase();
-          Array.prototype.forEach.call(tbody.rows, function (row) {
-            var matchesStatus = !statusVal || row.cells[APP_STATUS_COL].innerText.trim() === statusVal;
-            var matchesSearch = !searchVal || row.innerText.toLowerCase().indexOf(searchVal) !== -1;
-            row.style.display = matchesStatus && matchesSearch ? '' : 'none';
-          });
-        }
-
-        statusFilter.addEventListener('change', applyFilters);
-        search.addEventListener('input', applyFilters);
-      })();
-    </script>
+    ${scriptHtml}
   `)
 }
 
@@ -302,13 +345,21 @@ async function renderExternalJobs(): Promise<Response> {
       updatedAt: jobs.updatedAt,
     })
     .from(jobs)
-    .where(eq(jobs.status, 'external_saved'))
+    .where(inArray(jobs.status, ['external_saved', 'applied']))
     .orderBy(desc(jobs.createdAt))
     .limit(200)
 
   const items = rows
-    .map(
-      (r) => `
+    .map((r) => {
+      const action =
+        r.status === 'applied'
+          ? ''
+          : `<form method="post" action="/external-jobs/mark-applied" style="display:inline">
+               <input type="hidden" name="jobId" value="${escapeHtml(r.id)}" />
+               <button type="submit">Mark Applied</button>
+             </form>`
+
+      return `
     <tr>
       <td class="id-cell">${escapeHtml(r.id)}</td>
       <td>${escapeHtml(r.title)}</td>
@@ -322,14 +373,24 @@ async function renderExternalJobs(): Promise<Response> {
       <td>${escapeHtml(r.relevanceReason ?? '')}</td>
       <td>${r.createdAt?.toISOString() ?? ''}</td>
       <td>${r.updatedAt?.toISOString() ?? ''}</td>
-    </tr>`,
-    )
+      <td>${action}</td>
+    </tr>`
+    })
     .join('')
 
+  const { toolbarHtml, scriptHtml } = sortableFilterableTable({
+    tableId: 'extJobsTable',
+    statusColIndex: 8,
+    statusOptions: ['external_saved', 'applied'],
+    defaultStatusValue: 'external_saved',
+  })
+
   return page(
-    `<h1>External Jobs</h1><div class="table-scroll"><table><tr><th>Job ID</th><th>Job</th><th>Company</th><th>Location</th><th>Source</th><th>Apply Type</th><th>Apply URL</th><th>Source URL</th><th>Status</th><th>Relevance Reason</th><th>Found</th><th>Updated</th></tr>${items}</table></div>${
-      rows.length === 0 ? '<p>No external jobs saved yet.</p>' : ''
-    }`,
+    `<h1>External Jobs</h1>
+    ${toolbarHtml}
+    <div class="table-scroll"><table id="extJobsTable"><thead><tr><th data-sort>Job ID</th><th data-sort>Job</th><th data-sort>Company</th><th data-sort>Location</th><th data-sort>Source</th><th data-sort>Apply Type</th><th>Apply URL</th><th>Source URL</th><th data-sort>Status</th><th data-sort>Relevance Reason</th><th data-sort>Found</th><th data-sort>Updated</th><th>Action</th></tr></thead><tbody>${items}</tbody></table></div>
+    ${scriptHtml}
+    ${rows.length === 0 ? '<p>No external jobs saved yet.</p>' : ''}`,
   )
 }
 
@@ -367,10 +428,14 @@ async function renderCareerPages(): Promise<Response> {
     )
     .join('')
 
+  const { toolbarHtml, scriptHtml } = sortableFilterableTable({ tableId: 'careerPagesTable' })
+
   return page(
-    `<h1>Career Pages</h1><div class="table-scroll"><table><tr><th>ID</th><th>Label</th><th>URL</th><th>Added</th><th>Last checked</th><th>Scanned (all time)</th><th>Relevant found (all time)</th><th>Skipped (all time)</th></tr>${items}</table></div>${
-      rows.length === 0 ? '<p>No career pages tracked yet — use /add-career-url.</p>' : ''
-    }`,
+    `<h1>Career Pages</h1>
+    ${toolbarHtml}
+    <div class="table-scroll"><table id="careerPagesTable"><thead><tr><th data-sort>ID</th><th data-sort>Label</th><th>URL</th><th data-sort>Added</th><th data-sort>Last checked</th><th data-sort>Scanned (all time)</th><th data-sort>Relevant found (all time)</th><th data-sort>Skipped (all time)</th></tr></thead><tbody>${items}</tbody></table></div>
+    ${scriptHtml}
+    ${rows.length === 0 ? '<p>No career pages tracked yet — use /add-career-url.</p>' : ''}`,
   )
 }
 
@@ -572,12 +637,40 @@ async function handleRetry(req: Request): Promise<Response> {
   return new Response(null, { status: 303, headers: { Location: '/applications' } })
 }
 
+/** Plain requeue for a 'blocked' failure (broken page, navigation error,
+ * anything that isn't a specific unanswered question) — no answer to collect. */
+async function handleRetryJob(req: Request): Promise<Response> {
+  const form = await req.formData()
+  const jobId = String(form.get('jobId') ?? '')
+  if (!jobId) return new Response('bad request', { status: 400 })
+
+  await retryJob(jobId)
+
+  return new Response(null, { status: 303, headers: { Location: '/applications' } })
+}
+
+/** External jobs have no apply automation — the human applies manually on the
+ * source site and comes back here to record it, so the list can be filtered
+ * down to what's still outstanding. */
+async function handleMarkExternalApplied(req: Request): Promise<Response> {
+  const form = await req.formData()
+  const jobId = String(form.get('jobId') ?? '')
+  if (!jobId) return new Response('bad request', { status: 400 })
+
+  const db = getDb()
+  await db.update(jobs).set({ status: 'applied', updatedAt: new Date() }).where(eq(jobs.id, jobId))
+
+  return new Response(null, { status: 303, headers: { Location: '/external-jobs' } })
+}
+
 export async function handleRequest(req: Request): Promise<Response> {
   const url = new URL(req.url)
   if (req.method === 'GET' && url.pathname === '/') return renderSummary()
   if (req.method === 'GET' && url.pathname === '/applications') return renderApplications()
   if (req.method === 'POST' && url.pathname === '/applications/retry') return handleRetry(req)
+  if (req.method === 'POST' && url.pathname === '/applications/retry-job') return handleRetryJob(req)
   if (req.method === 'GET' && url.pathname === '/external-jobs') return renderExternalJobs()
+  if (req.method === 'POST' && url.pathname === '/external-jobs/mark-applied') return handleMarkExternalApplied(req)
   if (req.method === 'GET' && url.pathname === '/review') return renderReview()
   if (req.method === 'POST' && url.pathname === '/review/generate') return handleGenerate()
   if (req.method === 'POST' && url.pathname === '/review/cluster-feedback') return handleClusterFeedback(req)

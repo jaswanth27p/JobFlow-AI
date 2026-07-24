@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { Agent } from '@mastra/core/agent'
+import { noopLogger } from '@mastra/core/logger'
 import { createTool } from '@mastra/core/tools'
 import { AgentBrowser } from '@mastra/agent-browser'
 import type { ToolCallChunk, ToolResultChunk } from '@mastra/core/stream'
 import { getSharedCdpUrl } from '../browser/session.ts'
+import { reclaimOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, searchRuns } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -15,8 +17,7 @@ import { recordExternalJobFound } from '../notify/summary-aggregator.ts'
 import { noOpBrowserContextProcessor } from './no-op-browser-context-processor.ts'
 import { logger } from '../utils/logger.ts'
 import { isDevLogs } from '../utils/dev-mode.ts'
-import { loadResume, loadProfile } from '../profile/loader.ts'
-import { getCurrentConfig } from '../config/current.ts'
+import { buildScanInstructions } from '../prompts/search-agent.prompt.ts'
 
 const SEARCH_TAB = 'search' as const
 
@@ -90,16 +91,19 @@ export async function stopSearchAndWait(): Promise<void> {
 }
 
 interface ScanRunContext {
-  /** Hard cap on jobs opened this run — see computeMidPageContinueDecision. */
-  maxJobsPerRun: number
   signal: AbortSignal
   scanned: number
   queued: number
   externalSaved: number
+  skipped: number
   /** Jobs judged (new or already-seen) on the CURRENT page/batch — reset per
    * search URL and per page boundary, see computeRelevanceContinueDecision. */
   pageScanned: number
   pageRelevant: number
+  /** The tab this run's current search URL is open in. The easy-apply agent
+   * opening its own tab (see tab-guard.ts) can silently steal this agent's
+   * "active tab" pointer the same way — logSearchStep reclaims it every step. */
+  ownTab: OwnedTab | null
 }
 
 function formatToolArgs(args: unknown): string {
@@ -126,7 +130,11 @@ function formatToolArgs(args: unknown): string {
 async function logSearchStep(
   event: { toolCalls: ToolCallChunk[]; toolResults: ToolResultChunk[] },
   signal: AbortSignal,
+  ctx: ScanRunContext,
+  browser: AgentBrowser,
 ): Promise<void> {
+  if (ctx.ownTab) await reclaimOwnTab(browser, getSharedCdpUrl(), ctx.ownTab)
+
   const devLogs = isDevLogs()
   let navigated = false
   for (const call of event.toolCalls) {
@@ -153,9 +161,12 @@ async function logSearchStep(
   }
 }
 
-/** Hard mid-page stop conditions only — abort or the per-run job cap. Runs
- * regardless of any page's relevance ratio (see computeRelevanceContinueDecision
- * for that separate, page-boundary check). Pure so it's testable. */
+/** Hard mid-page stop condition only — abort. Runs regardless of any page's
+ * relevance ratio (see computeRelevanceContinueDecision for that separate,
+ * page-boundary check). Still accepts an optional maxJobsPerRun cap for
+ * testability, but nothing in the app wires one up — there is no job-count
+ * limit; check-page-relevance-ratio and running out of results/pages are what
+ * actually stop a scan. Pure so it's testable. */
 export function computeMidPageContinueDecision(ctx: {
   scanned: number
   aborted: boolean
@@ -248,6 +259,7 @@ function createReportJobTool(ctx: ScanRunContext) {
         .returning({ id: jobs.id })
 
       if (input.verdict === 'skip') {
+        ctx.skipped++
         pushLog(SEARCH_TAB, `Reviewed "${input.title}" at ${input.company} (id ${input.jobId}) — not relevant, skipped. Reason: ${input.reason}`)
       } else {
         ctx.pageRelevant++
@@ -269,11 +281,7 @@ function createReportJobTool(ctx: ScanRunContext) {
       const shouldContinue = computeMidPageContinueDecision({
         scanned: ctx.scanned,
         aborted: ctx.signal.aborted,
-        maxJobsPerRun: ctx.maxJobsPerRun,
       })
-      if (!shouldContinue && ctx.scanned >= ctx.maxJobsPerRun) {
-        pushLog(SEARCH_TAB, `Reached the per-run limit of ${ctx.maxJobsPerRun} jobs — stopping this page to avoid overusing LinkedIn.`)
-      }
       return { continue: shouldContinue }
     },
   })
@@ -325,107 +333,6 @@ function createRequestHumanInputTool() {
   })
 }
 
-export async function buildScanInstructions(): Promise<string> {
-  const config = getCurrentConfig()
-  const resume = await loadResume(config.profileFiles.resume)
-  const profile = await loadProfile(config.profileFiles.profile)
-
-  return `
-You are a LinkedIn job search assistant operating a real, already-logged-in browser. The search URL
-you're given already encodes the user's own filters (keywords, location, date posted, etc.), but you
-still judge each NEW job's relevance yourself before recording it.
-
-Candidate resume:
-${resume}
-
-Candidate profile (structured):
-${JSON.stringify(profile, null, 2)}
-
-Hiring requirements to match against:
-${config.requirements}
-
-CRITICAL RULE: report-job is the ONLY way a job is recorded and routed. If you select a job and do
-NOT call report-job for it (because it wasn't already flagged seen), that job is silently lost.
-
-Process the cards STRICTLY ONE AT A TIME, in order, without skipping ahead.
-
-=== HOW TO BROWSE JOBS (like a normal user, not an API) ===
-1. Open the given search results URL in a NEW browser tab (browser_tabs action "new", pointed at the
-   exact URL you were given) — do not modify it into a different endpoint, and do not reuse/navigate
-   the existing LinkedIn tab. This is the real LinkedIn Jobs search page: a left-hand column lists
-   job cards, and a right-hand pane shows the full detail/description of whichever card is currently
-   selected. Stay in this tab and interact with it purely by clicking, the way a person would.
-2. Take a browser_snapshot of the page (interactiveOnly: true unless you specifically need
-   descriptive text). In it, find the left-hand job list: an ordered list of clickable job-card
-   elements. Write down this list of refs, top to bottom, in order — this is your traversal order
-   for the current page, position 1 = the first card.
-3. For the currently-selected card (position 1 on first load, or whichever you just clicked), get its
-   job id from the "currentJobId" query param in the tab's current URL; if the URL hasn't updated
-   yet, use the selected card's data-occludable-job-id (or data-job-id) attribute instead. Never
-   invent a job id — if you truly cannot extract one, skip this card and move to the next position.
-4. Call check-already-seen with that jobId BEFORE reading anything else about this card. If seen is
-   true, do not read the detail pane at all — move straight to the next position in your traversal
-   list (step 7). This matters: reading and reasoning about an already-seen card wastes effort for no
-   benefit, since it will never be recorded again.
-5. If not seen: read the already-visible right-hand detail pane — title, company, location, whether
-   the apply control says "Easy Apply" (applyType "easy") or hands off to an external site (applyType
-   "external", any other apply-button label), and enough of the description to judge relevance. Judge
-   by substance, not literal title match: a job counts as relevant if its real responsibilities/stack
-   overlap meaningfully with the candidate's actual skills and experience, even if the title differs.
-   Still respect the requirements text's hard constraints (seniority, location, experience range).
-6. Call report-job with jobId, title, company, location, sourceUrl (the search results URL you were
-   given), applyUrl (construct the canonical https://www.linkedin.com/jobs/view/<jobId>/ from the
-   jobId — you don't need to have navigated there), applyType, verdict ("relevant" or "skip"), and a
-   short reason. Mandatory for every new card, regardless of verdict — a "skip" verdict still needs to
-   be recorded so the job is never re-judged. This call's continue field almost always returns true —
-   that's just a hard rate-limit/abort check, never a relevance decision. If it ever returns
-   continue: false, stop entirely: close this tab (browser_tabs action "close") and finish your turn
-   immediately.
-7. Advance to the NEXT position in your traversal list (position 2, then 3, then 4, ...) and
-   browser_click that card's ref to select it. This updates the right pane and the currentJobId in
-   place, no page reload. Go back to step 3 for this newly-selected card. Do this for every remaining
-   card on the page, one at a time, without stopping in between.
-8. Once you have handled every card that was in your step-2 traversal list (the whole page, not a
-   subset): if there is no more content and no next-page control, close this tab (browser_tabs action
-   "close") and finish your turn — no need to check relevance, there's nowhere left to go. Otherwise,
-   BEFORE loading more cards or clicking a "Next"/page-number control, call check-page-relevance-ratio.
-   If it returns continue: false, this search URL's results have dropped off too much — close this tab
-   (browser_tabs action "close") and finish your turn immediately, do NOT load more. If it returns
-   continue: true, proceed: take a fresh browser_snapshot; if the left-hand list now shows more cards
-   than before (LinkedIn infinite-scrolls more in), re-run step 2 to build a new traversal list starting
-   after the last card you already handled, and keep going from step 3; if instead there's a pagination
-   control, click it to load the next page of results in this SAME tab, then start over from step 2 for
-   the new page.
-9. If you hit a LinkedIn checkpoint, CAPTCHA, or any page that isn't the normal jobs search UI, call
-   request-human-input with a clear question describing what you're stuck on, then wait for the
-   answer before continuing.
-
-DO NOT STOP after just the first (auto-selected) card or after just one page. Finishing every card on
-a page, and continuing to the next page/scroll when there's more and check-page-relevance-ratio allows
-it, is the default behavior — the ONLY things that legitimately end this search URL are: report-job
-returning continue: false (hard rate-limit/abort stop, can happen mid-page),
-check-page-relevance-ratio returning continue: false (this page's relevance dropped too low), running
-out of both cards and a next-page control, or getting stuck badly enough to need request-human-input.
-
-Notes / gotchas:
-- Selecting a card (browser_click) is paced the same as opening a page — there's an automatic,
-  enforced pause after it before your next step runs, the same way a real person would pause to read
-  before clicking the next job. You don't need to add your own waits.
-- Be economical: an already-seen card costs you one check-already-seen call and nothing else — no
-  snapshot, no detail read. For a new card, read only what report-job needs, don't re-select a card
-  you already handled, and don't reload the search results between jobs.
-- Token economy matters too, not just navigation pacing: only take a fresh browser_snapshot when you
-  actually need the traversal-list refs (start of a page, or after new cards load in) — after clicking
-  a card, read its detail straight from the click result / already-visible pane rather than
-  re-snapshotting the whole page.
-
-Work through the ENTIRE page, and the next page after that (per the rules above), stopping only per
-the conditions listed. Before you finish your turn, double-check: did you call report-job once for
-every NEW card you selected, and did you actually reach one of the legitimate stop conditions rather
-than just pausing after one job? If not, keep going.
-`.trim()
-}
-
 export interface SearchRunResult {
   scanned: number
   queued: number
@@ -456,13 +363,14 @@ async function runSearchUrlsInner(urls: string[]): Promise<SearchRunResult> {
   await db.insert(searchRuns).values({ id: runId, urlsTried: [] })
 
   const ctx: ScanRunContext = {
-    maxJobsPerRun: appState.settings.maxJobsPerRun,
     signal: abort.signal,
     scanned: 0,
     queued: 0,
     externalSaved: 0,
+    skipped: 0,
     pageScanned: 0,
     pageRelevant: 0,
+    ownTab: null,
   }
 
   try {
@@ -482,6 +390,11 @@ async function runSearchUrlsInner(urls: string[]): Promise<SearchRunResult> {
         requestHumanInput: createRequestHumanInputTool(),
       },
     })
+    // Agent defaults to Mastra's ConsoleLogger, which writes raw (ANSI-colored)
+    // errors straight to stdout — corrupts the opentui TUI frame on any tool
+    // error (e.g. a Playwright navigation timeout). Silence it; failures are
+    // already surfaced via pushLog/logger.error at the call sites below.
+    agent.__setLogger(noopLogger)
 
     const triedUrls: string[] = []
     for (const url of urls) {
@@ -491,6 +404,9 @@ async function runSearchUrlsInner(urls: string[]): Promise<SearchRunResult> {
       // clean slate regardless of how the previous one ended.
       ctx.pageScanned = 0
       ctx.pageRelevant = 0
+      // '/jobs/search' distinguishes this URL's results tab from the login
+      // tabs (feed/inbox) and from any easy-apply tab (always '/jobs/view/').
+      ctx.ownTab = { matchFragment: '/jobs/search' }
 
       setAgentStatus(SEARCH_TAB, 'running', `scanning ${url}`)
       pushLog(SEARCH_TAB, `Scanning ${url}`)
@@ -499,13 +415,15 @@ async function runSearchUrlsInner(urls: string[]): Promise<SearchRunResult> {
       try {
         await agent.generate(`Search results URL to scan: ${url}`, {
           abortSignal: abort.signal,
-          onStepFinish: (event) => logSearchStep(event, abort.signal),
+          onStepFinish: (event) => logSearchStep(event, abort.signal, ctx, browser),
           // Mastra's Agent.generate defaults maxSteps to 5 tool-call steps total —
           // nowhere near enough to click through a page of job cards (each card is
           // several steps: snapshot, check-already-seen, report-job, click next).
-          // Budget generously per job scanned this run, with a floor so a low
-          // maxJobsPerRun setting doesn't reintroduce the cap.
-          maxSteps: Math.max(80, appState.settings.maxJobsPerRun * 10),
+          // There's no cap on jobs scanned per URL (check-page-relevance-ratio and
+          // running out of results/pages are what actually end a URL's scan), so
+          // this is sized as a generous, fixed backstop against a genuinely stuck
+          // agent — not a per-job budget.
+          maxSteps: 4000,
         })
       } catch (err) {
         if (abort.signal.aborted) {
@@ -521,16 +439,9 @@ async function runSearchUrlsInner(urls: string[]): Promise<SearchRunResult> {
           urlsTried: triedUrls,
           scannedCount: ctx.scanned,
           relevantCount: ctx.queued + ctx.externalSaved,
-          skippedCount: 0,
+          skippedCount: ctx.skipped,
         })
         .where(eq(searchRuns.id, runId))
-
-      // Per-run job budget is cumulative across all URLs — once spent, don't
-      // start scanning the next search URL. Rate-limit guard.
-      if (ctx.scanned >= ctx.maxJobsPerRun) {
-        pushLog(SEARCH_TAB, `Per-run job limit (${ctx.maxJobsPerRun}) reached — not scanning remaining search URLs.`)
-        break
-      }
 
       // Polite pause between search URLs so back-to-back page loads don't look
       // like a burst to LinkedIn.

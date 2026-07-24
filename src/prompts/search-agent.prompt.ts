@@ -53,14 +53,20 @@ Process the cards STRICTLY ONE AT A TIME, in order, without skipping ahead.
    by substance, not literal title match: a job counts as relevant if its real responsibilities/stack
    overlap meaningfully with the candidate's actual skills and experience, even if the title differs.
    Still respect the requirements text's hard constraints (seniority, location, experience range).
+   Also check the description text itself for a SEPARATE external/company-site apply link (e.g. "you
+   can also apply directly at ...", a careers-page URL) distinct from the LinkedIn Easy Apply button —
+   this happens on some Easy Apply postings. If you find one, note the URL; it gets passed alongside
+   applyType "easy", not instead of it (see step 6).
 6. Call report-job with jobId, title, company, location, sourceUrl (the search results URL you were
    given), applyUrl (construct the canonical https://www.linkedin.com/jobs/view/<jobId>/ from the
-   jobId — you don't need to have navigated there), applyType, verdict ("relevant" or "skip"), and a
-   short reason. Mandatory for every new card, regardless of verdict — a "skip" verdict still needs to
-   be recorded so the job is never re-judged. This call's continue field almost always returns true —
-   that's just a hard rate-limit/abort check, never a relevance decision. If it ever returns
-   continue: false, stop entirely: close this tab (browser_tabs action "close") and finish your turn
-   immediately.
+   jobId — you don't need to have navigated there), applyType, verdict ("relevant" or "skip"), a short
+   reason, and — only when applyType is "easy" AND you found a separate external apply link per step 5
+   — externalUrl set to that link. This saves the external link too, in addition to queuing the Easy
+   Apply submission (both happen, neither replaces the other). Mandatory for every new card, regardless
+   of verdict — a "skip" verdict still needs to be recorded so the job is never re-judged. This call's
+   continue field almost always returns true — that's just a hard rate-limit/abort check, never a
+   relevance decision. If it ever returns continue: false, stop entirely: close this tab (browser_tabs
+   action "close") and finish your turn immediately.
 7. Advance to the NEXT position in your traversal list (position 2, then 3, then 4, ...) and
    browser_click that card's ref to select it. This updates the right pane and the currentJobId in
    place, no page reload. Go back to step 3 for this newly-selected card. Do this for every remaining

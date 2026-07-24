@@ -17,6 +17,7 @@ import { recordExternalJobFound } from '../notify/summary-aggregator.ts'
 import { noOpBrowserContextProcessor } from './no-op-browser-context-processor.ts'
 import { logger } from '../utils/logger.ts'
 import { isDevLogs } from '../utils/dev-mode.ts'
+import { applyUrlToJobId } from '../utils/apply-url-hash.ts'
 import { buildScanInstructions } from '../prompts/search-agent.prompt.ts'
 
 const SEARCH_TAB = 'search' as const
@@ -230,6 +231,12 @@ function createReportJobTool(ctx: ScanRunContext) {
       applyType: z.enum(['easy', 'external']),
       verdict: z.enum(['relevant', 'skip']),
       reason: z.string(),
+      // Some Easy Apply postings ALSO advertise a separate external/company-site
+      // apply link in the description (e.g. "you can also apply directly at
+      // ..."). Set this alongside applyType: "easy" to save that link too, in
+      // addition to queuing the Easy Apply submission — the two are independent,
+      // not a replacement for each other. Leave unset otherwise.
+      externalUrl: z.string().optional(),
     }),
     outputSchema: z.object({ continue: z.boolean() }),
     execute: async (input) => {
@@ -275,6 +282,35 @@ function createReportJobTool(ctx: ScanRunContext) {
           }
         } else {
           pushLog(SEARCH_TAB, `Found "${input.title}" at ${input.company} (id ${input.jobId}) — already recorded, not routed again.`)
+        }
+
+        // A separate external apply link alongside an Easy Apply job — keyed by
+        // its own URL hash (not the LinkedIn job id) since it's a distinct
+        // record from the Easy Apply queue entry above, the same way
+        // career-scan-agent keys career-page postings.
+        if (input.applyType === 'easy' && input.externalUrl) {
+          const externalId = applyUrlToJobId(input.externalUrl)
+          const externalInserted = await db
+            .insert(jobs)
+            .values({
+              id: externalId,
+              title: input.title,
+              company: input.company,
+              location: input.location ?? null,
+              applyUrl: input.externalUrl,
+              applyType: 'external',
+              sourceUrl: input.sourceUrl,
+              status: 'external_saved',
+              relevanceReason: input.reason,
+            })
+            .onConflictDoNothing()
+            .returning({ id: jobs.id })
+
+          if (externalInserted.length > 0) {
+            ctx.externalSaved++
+            recordExternalJobFound()
+            pushLog(SEARCH_TAB, `"${input.title}" at ${input.company} also lists an external apply link — saved that too.`)
+          }
         }
       }
 

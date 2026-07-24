@@ -1,4 +1,4 @@
-import { randomUUID, createHash } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { Agent } from '@mastra/core/agent'
@@ -17,6 +17,7 @@ import { buildPageScanInstructions } from '../prompts/career-scan-agent.prompt.t
 import { logger } from '../utils/logger.ts'
 import { isDevLogs } from '../utils/dev-mode.ts'
 import { summarizeError } from '../utils/error-summary.ts'
+import { applyUrlToJobId } from '../utils/apply-url-hash.ts'
 import type { TabId } from '../state/types.ts'
 
 const CAREERS_TAB: TabId = 'careers'
@@ -44,13 +45,7 @@ function randomNavDelayMs(): number {
   return min + Math.floor(Math.random() * (max - min + 1))
 }
 
-/** Stable id for a career-page posting, derived from its apply URL rather than
- * supplied by the model — stays the same across rescans of the same posting,
- * which is what lets check-posting-seen recognize a posting judged in an
- * earlier /check-careers run, and can't be spoofed/mistyped. */
-export function applyUrlToJobId(applyUrl: string): string {
-  return createHash('sha1').update(applyUrl.trim()).digest('hex')
-}
+export { applyUrlToJobId }
 
 let sharedBrowser: AgentBrowser | null = null
 

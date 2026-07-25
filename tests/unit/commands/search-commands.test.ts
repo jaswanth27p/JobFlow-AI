@@ -8,10 +8,11 @@ import type { AppConfig } from '../../../src/config/schema.ts'
 
 function makeConfig(): AppConfig {
   return {
-    mustCheckUrls: [],
+    urlGroups: [],
     requirements: 'placeholder',
     concurrency: 1,
     model: 'test',
+    models: {},
     notifySummaryIntervalMinutes: 30,
     profileFiles: { resume: './resume.md', profile: './profile.json' },
     extraPrompts: { search: '', easyApply: '' },
@@ -77,5 +78,31 @@ describe('search commands', () => {
     expect(appState.tabs.search.logs).toContain(
       'Invalid duration: not-a-duration. Use formats like 1h, 3h, 90m, 3h30m.',
     )
+  })
+
+  test('/search-urls with no groups configured logs a message instead of opening a picker', async () => {
+    await getCommand('search-urls')!.run({ args: [], rawArgs: '' })
+    expect(appState.tabs.search.logs).toContain(
+      'No URL groups configured — add one to urlGroups in linkedin-auto.config.ts.',
+    )
+    expect(optionPickerOpen()).toBe(false)
+  })
+
+  test('/search-urls with groups configured opens the group picker', async () => {
+    setCurrentConfig({
+      ...makeConfig(),
+      urlGroups: [{ name: 'Hyderabad', urls: [{ url: 'https://example.com', scanFullList: false }] }],
+    })
+    await getCommand('search-urls')!.run({ args: [], rawArgs: '' })
+    expect(optionPickerOpen()).toBe(true)
+  })
+
+  test('/auto-on loop opens the group picker as its final step', async () => {
+    setCurrentConfig({
+      ...makeConfig(),
+      urlGroups: [{ name: 'Hyderabad', urls: [{ url: 'https://example.com', scanFullList: false }] }],
+    })
+    await getCommand('auto-on')!.run({ args: ['loop'], rawArgs: 'loop' })
+    expect(optionPickerOpen()).toBe(true)
   })
 })

@@ -11,6 +11,10 @@ import { prefillInput } from '../tui/components/InputBar.tsx'
 import { setTheme } from '../tui/theme/current.ts'
 import { hasTheme } from '../tui/theme/index.ts'
 import { persistThemeName } from '../tui/theme/persist.ts'
+import { loadConfig } from '../config/loader.ts'
+import { setCurrentConfig } from '../config/current.ts'
+import { logger } from '../utils/logger.ts'
+import { summarizeError } from '../utils/error-summary.ts'
 
 export function registerGlobalCommands(): void {
   registerCommand({
@@ -127,6 +131,22 @@ export function registerGlobalCommands(): void {
         return
       }
       pushLog(appState.activeTab, `Set ${key} = ${value}`)
+    },
+  })
+
+  registerCommand({
+    name: 'reload-config',
+    scope: 'global',
+    description: 'Re-read linkedin-auto.config.ts (url groups, models, prompts, requirements) without restarting',
+    run: async () => {
+      try {
+        const next = await loadConfig()
+        setCurrentConfig(next)
+        pushLog(appState.activeTab, 'Config reloaded.')
+      } catch (err) {
+        pushLog(appState.activeTab, `Config reload failed, keeping previous config: ${summarizeError(err)}`)
+        logger.error({ err }, 'reload-config failed')
+      }
     },
   })
 

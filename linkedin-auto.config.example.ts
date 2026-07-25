@@ -1,12 +1,19 @@
 import type { AppConfig } from './src/config/schema.ts'
 
 export default {
-  // LinkedIn search-results URLs to run with /search-urls or /auto-on. Each
-  // URL's own filters (keywords, location, date posted) are trusted as the
-  // relevance signal — the search agent doesn't re-judge relevance against
-  // requirements below, it only dedupes and routes.
-  mustCheckUrls: [
-    "https://www.linkedin.com/jobs/search-results/?keywords=software%20engineer&f_TPR=r86400",
+  // Named groups of search-results URLs. /search-urls and /auto-on open a
+  // picker to choose one group or "All groups". Each URL's own filters
+  // (keywords, location, date posted) are trusted as the relevance signal —
+  // the search agent doesn't re-judge relevance against requirements below,
+  // it only dedupes and routes. scanFullList: true bypasses the
+  // relevance-ratio pagination gate and scans every page of that URL.
+  urlGroups: [
+    {
+      name: "Hyderabad",
+      urls: [
+        { url: "https://www.linkedin.com/jobs/search-results/?keywords=software%20engineer&f_TPR=r86400", scanFullList: false },
+      ],
+    },
   ],
   // Free text. Used ONLY by the career-page scan agent (/add-career-url +
   // /check-careers) to judge relevance — an arbitrary careers page has no
@@ -30,6 +37,9 @@ export default {
     easyApply: "",
   },
   model: "opencode-go/deepseek-v4-flash",
+  // Per-agent overrides — unset falls back to `model` above. e.g.:
+  //   models: { easyApply: "opencode-go/deepseek-v4-pro" },
+  models: {},
   // How often (minutes) to batch external-job-found / easy-apply-result
   // counts into one desktop notification.
   notifySummaryIntervalMinutes: 30,

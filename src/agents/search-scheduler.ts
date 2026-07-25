@@ -1,6 +1,5 @@
-import { getCurrentConfig } from '../config/current.ts'
 import { appState, pushLog } from '../state/app-state.ts'
-import { runSearchUrls, isSearchRunning, stopSearchAndWait } from './search-agent.ts'
+import { runSearchUrls, isSearchRunning, stopSearchAndWait, type ScanUrlEntry } from './search-agent.ts'
 import { startEasyApplyWorker } from '../queues/easy-apply-worker.ts'
 import { logger } from '../utils/logger.ts'
 import { summarizeError } from '../utils/error-summary.ts'
@@ -63,6 +62,12 @@ interface SchedulerState {
   intervalHandle: ReturnType<typeof setInterval> | null
   loopActive: boolean
   tickRunning: boolean
+  /** The URL entries and group label picked when /auto-on was started —
+   * captured once, not re-read from config each cycle, so a later
+   * /reload-config or config edit never silently alters an in-flight
+   * rotation; only the next /auto-on start picks up new groups. */
+  entries: ScanUrlEntry[]
+  groupLabel: string
 }
 
 const state: SchedulerState = {
@@ -71,6 +76,8 @@ const state: SchedulerState = {
   intervalHandle: null,
   loopActive: false,
   tickRunning: false,
+  entries: [],
+  groupLabel: '',
 }
 
 /** Tracks whatever single run is currently in flight, regardless of mode, so
@@ -90,13 +97,12 @@ async function runConfiguredUrls(): Promise<void> {
     pushLog(SEARCH_TAB, 'Auto mode: skipping this cycle — a search is already running.')
     return
   }
-  const config = getCurrentConfig()
-  if (config.mustCheckUrls.length === 0) {
+  if (state.entries.length === 0) {
     pushLog(SEARCH_TAB, 'Auto mode: no configured URLs to scan — skipping this cycle.')
     return
   }
   try {
-    await runSearchUrls(config.mustCheckUrls)
+    await runSearchUrls(state.entries)
   } catch (err) {
     pushLog(SEARCH_TAB, `Auto mode: cycle failed: ${summarizeError(err)}`)
     logger.error({ err }, 'auto mode: cycle failed')
@@ -148,18 +154,20 @@ function ensureApplyWorkersRunning(): void {
   startEasyApplyWorker()
 }
 
-export function startAutoMode(mode: AutoMode, intervalMs?: number): void {
+export function startAutoMode(mode: AutoMode, entries: ScanUrlEntry[], groupLabel: string, intervalMs?: number): void {
   if (state.mode !== null) {
     pushLog(SEARCH_TAB, `Auto mode is already on (${state.mode}). Use /auto-off first.`)
     return
   }
 
+  state.entries = entries
+  state.groupLabel = groupLabel
   ensureApplyWorkersRunning()
 
   if (mode === 'loop') {
     state.mode = 'loop'
     state.loopActive = true
-    pushLog(SEARCH_TAB, 'Auto mode: loop started (running configured search URLs continuously).')
+    pushLog(SEARCH_TAB, `Auto mode: loop started (group: ${groupLabel}).`)
     void runLoop()
     return
   }
@@ -168,7 +176,7 @@ export function startAutoMode(mode: AutoMode, intervalMs?: number): void {
   if (!intervalMs) throw new Error('intervalMs is required for interval mode')
   state.mode = 'interval'
   state.intervalMs = intervalMs
-  pushLog(SEARCH_TAB, `Auto mode: interval started, every ${formatDuration(intervalMs)}.`)
+  pushLog(SEARCH_TAB, `Auto mode: interval started, every ${formatDuration(intervalMs)} (group: ${groupLabel}).`)
   state.intervalHandle = setInterval(() => {
     void runIntervalTick()
   }, intervalMs)

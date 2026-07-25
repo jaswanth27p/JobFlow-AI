@@ -1,12 +1,9 @@
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
-import { writeFile, rm } from 'node:fs/promises'
+import { describe, test, expect } from 'bun:test'
 import {
   computeMidPageContinueDecision,
   computeRelevanceContinueDecision,
 } from '../../../src/agents/search-agent.ts'
 import { buildScanInstructions } from '../../../src/prompts/search-agent.prompt.ts'
-import { setCurrentConfig } from '../../../src/config/current.ts'
-import { loadConfig } from '../../../src/config/loader.ts'
 
 describe('computeMidPageContinueDecision', () => {
   test('continues when nothing has been scanned yet', () => {
@@ -54,41 +51,28 @@ describe('computeRelevanceContinueDecision', () => {
   test('single irrelevant job on a single-job page stops', () => {
     expect(computeRelevanceContinueDecision({ pageScanned: 1, pageRelevant: 0, threshold: 0.25 })).toBe(false)
   })
+
+  test('scanFullList bypasses the ratio check even when it would otherwise stop', () => {
+    expect(
+      computeRelevanceContinueDecision({ pageScanned: 10, pageRelevant: 0, threshold: 0.25, scanFullList: true }),
+    ).toBe(true)
+  })
+
+  test('scanFullList defaults to off (unset behaves like false)', () => {
+    expect(computeRelevanceContinueDecision({ pageScanned: 10, pageRelevant: 1, threshold: 0.25 })).toBe(false)
+  })
 })
 
 describe('buildScanInstructions', () => {
-  const TEST_PROFILE_PATH = './data/test-profile-search-agent.json'
-
-  beforeAll(async () => {
-    await writeFile(
-      TEST_PROFILE_PATH,
-      JSON.stringify(
-        {
-          contact: { email: 'a@b.com', phone: '', location: '' },
-          workAuth: { authorized: true, requiresSponsorship: false },
-          experienceYears: 2,
-          salaryExpectation: { min: 0, max: 0, currency: 'USD' },
-          links: { linkedin: '', github: '', portfolio: '' },
-          answers: {},
-        },
-        null,
-        2,
-      ),
-    )
-    const baseConfig = await loadConfig('./linkedin-auto.config.ts')
-    setCurrentConfig({ ...baseConfig, profileFiles: { ...baseConfig.profileFiles, profile: TEST_PROFILE_PATH } })
-  })
-
-  afterAll(async () => {
-    await rm(TEST_PROFILE_PATH, { force: true })
-  })
-
-  test('describes the dedupe-first, judged-relevance flow', async () => {
-    const instructions = await buildScanInstructions()
+  test('describes the dedupe-first, navigate-only flow (no relevance judging)', () => {
+    const instructions = buildScanInstructions()
     expect(instructions).toContain('check-already-seen')
-    expect(instructions).toContain('report-job')
+    expect(instructions).toContain('judge-and-report-job')
     expect(instructions).toContain('check-page-relevance-ratio')
-    expect(instructions).toContain('verdict')
     expect(instructions).toContain('interactiveOnly: true')
+    // The navigator must never be told to judge relevance itself — that's the
+    // isolated job-relevance-judge's job, called per job with no carryover.
+    expect(instructions).not.toContain('verdict')
+    expect(instructions).not.toContain('resume')
   })
 })

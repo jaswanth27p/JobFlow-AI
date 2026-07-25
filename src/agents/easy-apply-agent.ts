@@ -10,6 +10,7 @@ import { AgentBrowser } from '@mastra/agent-browser'
 import { getEasyApplyCdpUrl } from '../browser/easy-apply-session.ts'
 import { openOwnTab, reclaimOwnTab, closeOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
 import { getCurrentConfig } from '../config/current.ts'
+import { resolveModel } from '../config/resolve-model.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, applications, type RecordedAnswer, type AnswerSource } from '../db/schema.ts'
 import { loadProfile, saveLearnedAnswer } from '../profile/loader.ts'
@@ -281,7 +282,7 @@ async function processEasyApplyJobInTab(
         id: 'easy-apply-agent',
         name: 'Easy Apply Agent',
         instructions,
-        model: appState.settings.model,
+        model: resolveModel(config, appState.settings.model, 'easyApply'),
         browser,
         inputProcessors: [noOpBrowserContextProcessor],
         tools: {

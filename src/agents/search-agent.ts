@@ -17,8 +17,12 @@ import { recordExternalJobFound } from '../notify/summary-aggregator.ts'
 import { noOpBrowserContextProcessor } from './no-op-browser-context-processor.ts'
 import { logger } from '../utils/logger.ts'
 import { isDevLogs } from '../utils/dev-mode.ts'
+import { summarizeError } from '../utils/error-summary.ts'
 import { applyUrlToJobId } from '../utils/apply-url-hash.ts'
 import { buildScanInstructions } from '../prompts/search-agent.prompt.ts'
+import { judgeJob } from './job-relevance-judge.ts'
+import { getCurrentConfig } from '../config/current.ts'
+import { resolveModel } from '../config/resolve-model.ts'
 
 const SEARCH_TAB = 'search' as const
 
@@ -91,6 +95,15 @@ export async function stopSearchAndWait(): Promise<void> {
   }
 }
 
+/** One search URL plus its per-URL full-list-scan flag — see runSearchUrls. */
+export interface ScanUrlEntry {
+  url: string
+  /** When true, check-page-relevance-ratio always allows continuing —
+   * relevance drop-off never ends this URL's scan early, it only stops when
+   * it genuinely runs out of cards/pages. */
+  scanFullList: boolean
+}
+
 interface ScanRunContext {
   signal: AbortSignal
   scanned: number
@@ -105,6 +118,13 @@ interface ScanRunContext {
    * opening its own tab (see tab-guard.ts) can silently steal this agent's
    * "active tab" pointer the same way — logSearchStep reclaims it every step. */
   ownTab: OwnedTab | null
+  /** The search URL currently being scanned — set once per URL in the run
+   * loop below, read by judge-and-report-job so the navigating agent never
+   * has to pass it through a tool call itself. */
+  currentSourceUrl: string
+  /** This URL's scanFullList flag — set once per URL in the run loop below,
+   * read by check-page-relevance-ratio to decide whether to bypass its gate. */
+  currentScanFullList: boolean
 }
 
 function formatToolArgs(args: unknown): string {
@@ -182,12 +202,16 @@ export function computeMidPageContinueDecision(ctx: {
 /** Page-boundary gate: whether to keep paginating this search URL, based on
  * what fraction of the page's jobs (new + already-seen) were relevant. An
  * already-seen job counts via its stored status — see check-already-seen.
- * Pure so it's testable. */
+ * scanFullList (the per-URL config flag) bypasses the ratio check entirely —
+ * always continue, only running out of cards/pages ends the URL. Pure so
+ * it's testable. */
 export function computeRelevanceContinueDecision(ctx: {
   pageScanned: number
   pageRelevant: number
   threshold: number
+  scanFullList?: boolean
 }): boolean {
+  if (ctx.scanFullList) return true
   if (ctx.pageScanned === 0) return true
   return ctx.pageRelevant / ctx.pageScanned >= ctx.threshold
 }
@@ -196,7 +220,7 @@ function createCheckAlreadySeenTool(ctx: ScanRunContext) {
   return createTool({
     id: 'check-already-seen',
     description:
-      "Check whether a LinkedIn job posting has already been recorded in a previous run. Call this BEFORE reading anything else about a card, using the numeric job id from its URL (the digits after /jobs/view/) or its data-occludable-job-id/data-job-id attribute. If seen is true, skip this card immediately — do not read its detail pane, do not call report-job for it.",
+      "Check whether a LinkedIn job posting has already been recorded in a previous run. Call this BEFORE reading anything else about a card, using the numeric job id from its URL (the digits after /jobs/view/) or its data-occludable-job-id/data-job-id attribute. If seen is true, skip this card immediately — do not read its detail pane, do not call judge-and-report-job for it.",
     inputSchema: z.object({ jobId: z.string() }),
     outputSchema: z.object({ seen: z.boolean() }),
     execute: async ({ jobId }) => {
@@ -216,35 +240,53 @@ function createCheckAlreadySeenTool(ctx: ScanRunContext) {
   })
 }
 
-function createReportJobTool(ctx: ScanRunContext) {
+/**
+ * For a NEW card (check-already-seen said not seen): reads the currently-
+ * selected detail pane itself (a direct browser.snapshot() call, never
+ * exposed to the navigating agent as a tool) and hands that text to the
+ * isolated per-job judge (job-relevance-judge.ts) — a fresh Agent + a single
+ * generate() call with no shared history, so the posting's full text, and
+ * the judge's own reasoning about it, never enter the navigating agent's
+ * conversation and never carry forward to the next job. The navigator only
+ * ever sees this tool's small {continue} result.
+ */
+function createJudgeAndReportJobTool(ctx: ScanRunContext, browser: AgentBrowser) {
   return createTool({
-    id: 'report-job',
+    id: 'judge-and-report-job',
     description:
-      'Record your relevance verdict for a newly-found job (one check-already-seen did NOT flag as seen) and route it. Call this exactly once per new card. Returns whether to keep scanning (a hard rate-limit/abort check only, never a relevance decision — that\'s check-page-relevance-ratio\'s job).',
-    inputSchema: z.object({
-      jobId: z.string(),
-      title: z.string(),
-      company: z.string(),
-      location: z.string().optional(),
-      sourceUrl: z.string(),
-      applyUrl: z.string(),
-      applyType: z.enum(['easy', 'external']),
-      verdict: z.enum(['relevant', 'skip']),
-      reason: z.string(),
-      // Some Easy Apply postings ALSO advertise a separate external/company-site
-      // apply link in the description (e.g. "you can also apply directly at
-      // ..."). Set this alongside applyType: "easy" to save that link too, in
-      // addition to queuing the Easy Apply submission — the two are independent,
-      // not a replacement for each other. Leave unset otherwise.
-      externalUrl: z.string().optional(),
-    }),
+      'For a NEW job card (one check-already-seen did NOT flag as seen) that is currently selected in the detail pane: reads the full posting and judges it against the candidate resume/profile/requirements in an independent call, then records and routes the result. Call this exactly once per new card, right after selecting it — do not read or reason about the posting yourself first. Returns whether to keep scanning (a hard rate-limit/abort check only, never a relevance decision — that\'s check-page-relevance-ratio\'s job).',
+    inputSchema: z.object({ jobId: z.string() }),
     outputSchema: z.object({ continue: z.boolean() }),
-    execute: async (input) => {
+    execute: async ({ jobId }) => {
       ctx.scanned++
       ctx.pageScanned++
 
+      const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
+      const snap = await browser.snapshot({ interactiveOnly: false })
+      const jobText = 'snapshot' in snap && snap.snapshot ? snap.snapshot : ''
+
+      let verdict: Awaited<ReturnType<typeof judgeJob>>
+      try {
+        if (!jobText) throw new Error('Could not read the job detail pane (empty snapshot)')
+        verdict = await judgeJob(jobText, resolveModel(getCurrentConfig(), appState.settings.model, 'judge'))
+      } catch (err) {
+        // A failed/unparseable judgment must not crash the whole run — record
+        // it as skipped (safe default) so it's never silently lost, and never
+        // re-judged as if it were untouched.
+        logger.error({ err, jobId }, 'search: relevance judge failed')
+        verdict = {
+          title: 'Unknown',
+          company: 'Unknown',
+          location: null,
+          applyType: 'external',
+          externalUrl: null,
+          verdict: 'skip',
+          reason: `Relevance judge failed: ${summarizeError(err)}`,
+        }
+      }
+
       const db = getDb()
-      const status = input.verdict === 'skip' ? 'skipped' : input.applyType === 'easy' ? 'queued' : 'external_saved'
+      const status = verdict.verdict === 'skip' ? 'skipped' : verdict.applyType === 'easy' ? 'queued' : 'external_saved'
       // .returning() tells us whether this insert actually happened (vs.
       // conflicting with an existing row) — only route on a real insert, so a
       // job already in the DB (e.g. the model skipped check-already-seen)
@@ -252,56 +294,56 @@ function createReportJobTool(ctx: ScanRunContext) {
       const inserted = await db
         .insert(jobs)
         .values({
-          id: input.jobId,
-          title: input.title,
-          company: input.company,
-          location: input.location ?? null,
-          applyUrl: input.applyUrl,
-          applyType: input.applyType,
-          sourceUrl: input.sourceUrl,
+          id: jobId,
+          title: verdict.title,
+          company: verdict.company,
+          location: verdict.location,
+          applyUrl,
+          applyType: verdict.applyType,
+          sourceUrl: ctx.currentSourceUrl,
           status,
-          relevanceReason: input.reason,
+          relevanceReason: verdict.reason,
         })
         .onConflictDoNothing()
         .returning({ id: jobs.id })
 
-      if (input.verdict === 'skip') {
+      if (verdict.verdict === 'skip') {
         ctx.skipped++
-        pushLog(SEARCH_TAB, `Reviewed "${input.title}" at ${input.company} (id ${input.jobId}) — not relevant, skipped. Reason: ${input.reason}`)
+        pushLog(SEARCH_TAB, `Reviewed "${verdict.title}" at ${verdict.company} (id ${jobId}) — not relevant, skipped. Reason: ${verdict.reason}`)
       } else {
         ctx.pageRelevant++
         if (inserted.length > 0) {
-          if (input.applyType === 'easy') {
+          if (verdict.applyType === 'easy') {
             ctx.queued++
-            await enqueueApplyJob(input.jobId)
-            pushLog(SEARCH_TAB, `Found "${input.title}" at ${input.company} (id ${input.jobId}) — added to the Easy Apply queue.`)
+            await enqueueApplyJob(jobId)
+            pushLog(SEARCH_TAB, `Found "${verdict.title}" at ${verdict.company} (id ${jobId}) — added to the Easy Apply queue.`)
           } else {
             ctx.externalSaved++
             recordExternalJobFound()
-            pushLog(SEARCH_TAB, `Found "${input.title}" at ${input.company} (id ${input.jobId}) — external apply, saved and notified.`)
+            pushLog(SEARCH_TAB, `Found "${verdict.title}" at ${verdict.company} (id ${jobId}) — external apply, saved and notified.`)
           }
         } else {
-          pushLog(SEARCH_TAB, `Found "${input.title}" at ${input.company} (id ${input.jobId}) — already recorded, not routed again.`)
+          pushLog(SEARCH_TAB, `Found "${verdict.title}" at ${verdict.company} (id ${jobId}) — already recorded, not routed again.`)
         }
 
         // A separate external apply link alongside an Easy Apply job — keyed by
         // its own URL hash (not the LinkedIn job id) since it's a distinct
         // record from the Easy Apply queue entry above, the same way
         // career-scan-agent keys career-page postings.
-        if (input.applyType === 'easy' && input.externalUrl) {
-          const externalId = applyUrlToJobId(input.externalUrl)
+        if (verdict.applyType === 'easy' && verdict.externalUrl) {
+          const externalId = applyUrlToJobId(verdict.externalUrl)
           const externalInserted = await db
             .insert(jobs)
             .values({
               id: externalId,
-              title: input.title,
-              company: input.company,
-              location: input.location ?? null,
-              applyUrl: input.externalUrl,
+              title: verdict.title,
+              company: verdict.company,
+              location: verdict.location,
+              applyUrl: verdict.externalUrl,
               applyType: 'external',
-              sourceUrl: input.sourceUrl,
+              sourceUrl: ctx.currentSourceUrl,
               status: 'external_saved',
-              relevanceReason: input.reason,
+              relevanceReason: verdict.reason,
             })
             .onConflictDoNothing()
             .returning({ id: jobs.id })
@@ -309,7 +351,7 @@ function createReportJobTool(ctx: ScanRunContext) {
           if (externalInserted.length > 0) {
             ctx.externalSaved++
             recordExternalJobFound()
-            pushLog(SEARCH_TAB, `"${input.title}" at ${input.company} also lists an external apply link — saved that too.`)
+            pushLog(SEARCH_TAB, `"${verdict.title}" at ${verdict.company} also lists an external apply link — saved that too.`)
           }
         }
       }
@@ -335,7 +377,14 @@ function createCheckPageRelevanceRatioTool(ctx: ScanRunContext) {
         pageScanned: ctx.pageScanned,
         pageRelevant: ctx.pageRelevant,
         threshold: RELEVANCE_CONTINUE_THRESHOLD,
+        scanFullList: ctx.currentScanFullList,
       })
+      if (ctx.currentScanFullList) {
+        pushLog(SEARCH_TAB, 'Full-list mode: continuing regardless of relevance.')
+        ctx.pageScanned = 0
+        ctx.pageRelevant = 0
+        return { continue: true }
+      }
       const pct = ctx.pageScanned === 0 ? 0 : Math.round((ctx.pageRelevant / ctx.pageScanned) * 100)
       if (shouldContinue) {
         pushLog(SEARCH_TAB, `Page relevance: ${ctx.pageRelevant}/${ctx.pageScanned} (${pct}%) — continuing to more results.`)
@@ -376,17 +425,17 @@ export interface SearchRunResult {
   urlsTried: string[]
 }
 
-export function runSearchUrls(urls: string[]): Promise<SearchRunResult> {
-  const run = runSearchUrlsInner(urls)
+export function runSearchUrls(entries: ScanUrlEntry[]): Promise<SearchRunResult> {
+  const run = runSearchUrlsInner(entries)
   activeRunPromise = run.finally(() => {
     activeRunPromise = null
   })
   return run
 }
 
-async function runSearchUrlsInner(urls: string[]): Promise<SearchRunResult> {
+async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunResult> {
   if (isSearchRunning()) throw new Error('A search is already running')
-  if (urls.length === 0) {
+  if (entries.length === 0) {
     pushLog(SEARCH_TAB, 'No search URLs to run.')
     return { scanned: 0, queued: 0, externalSaved: 0, urlsTried: [] }
   }
@@ -407,21 +456,23 @@ async function runSearchUrlsInner(urls: string[]): Promise<SearchRunResult> {
     pageScanned: 0,
     pageRelevant: 0,
     ownTab: null,
+    currentSourceUrl: '',
+    currentScanFullList: false,
   }
 
   try {
-    const instructions = await buildScanInstructions()
+    const instructions = buildScanInstructions()
     const browser = getSearchBrowser()
     const agent = new Agent({
       id: 'search-agent',
       name: 'Search Agent',
       instructions,
-      model: appState.settings.model,
+      model: resolveModel(getCurrentConfig(), appState.settings.model, 'search'),
       browser,
       inputProcessors: [noOpBrowserContextProcessor],
       tools: {
         checkAlreadySeen: createCheckAlreadySeenTool(ctx),
-        reportJob: createReportJobTool(ctx),
+        judgeAndReportJob: createJudgeAndReportJobTool(ctx, browser),
         checkPageRelevanceRatio: createCheckPageRelevanceRatioTool(ctx),
         requestHumanInput: createRequestHumanInputTool(),
       },
@@ -433,13 +484,17 @@ async function runSearchUrlsInner(urls: string[]): Promise<SearchRunResult> {
     agent.__setLogger(noopLogger)
 
     const triedUrls: string[] = []
-    for (const url of urls) {
+    for (const entry of entries) {
       if (abort.signal.aborted) break
+
+      const url = entry.url
 
       // Page-relevance counters are per search URL — a fresh URL starts with a
       // clean slate regardless of how the previous one ended.
       ctx.pageScanned = 0
       ctx.pageRelevant = 0
+      ctx.currentSourceUrl = url
+      ctx.currentScanFullList = entry.scanFullList
       // '/jobs/search' distinguishes this URL's results tab from the login
       // tabs (feed/inbox) and from any easy-apply tab (always '/jobs/view/').
       ctx.ownTab = { matchFragment: '/jobs/search' }
@@ -454,7 +509,9 @@ async function runSearchUrlsInner(urls: string[]): Promise<SearchRunResult> {
           onStepFinish: (event) => logSearchStep(event, abort.signal, ctx, browser),
           // Mastra's Agent.generate defaults maxSteps to 5 tool-call steps total —
           // nowhere near enough to click through a page of job cards (each card is
-          // several steps: snapshot, check-already-seen, report-job, click next).
+          // a few steps: snapshot, check-already-seen, judge-and-report-job, click
+          // next — judge-and-report-job's own isolated judge call does NOT count
+          // against this budget, since it's a separate agent.generate() entirely).
           // There's no cap on jobs scanned per URL (check-page-relevance-ratio and
           // running out of results/pages are what actually end a URL's scan), so
           // this is sized as a generous, fixed backstop against a genuinely stuck

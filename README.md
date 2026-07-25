@@ -100,12 +100,20 @@ Copied from `linkedin-auto.config.example.ts` (step 5 above) — this is your pe
 
 ```ts
 export default {
-  mustCheckUrls: [                    // LinkedIn search-results URLs to run with /search-urls or /auto-on.
-    'https://www.linkedin.com/jobs/search/?f_TPR=r86400&keywords=software%20engineer',
+  urlGroups: [                        // Named groups of search-results URLs. /search-urls and /auto-on
+    {                                 // open a picker to choose one group or "All groups".
+      name: 'Hyderabad',
+      urls: [
+        {
+          url: 'https://www.linkedin.com/jobs/search/?f_TPR=r86400&keywords=software%20engineer',
+          scanFullList: false,        // true = ignore the relevance-ratio pagination gate for this URL
+        },                            // and scan every page till results run out.
+      ],
+    },
   ],
   requirements: `                     // Free text — used ONLY by the career-page scan agent
     Look for senior backend / full-stack engineering roles.  // (/add-career-url + /check-careers). LinkedIn search
-    Prefer remote or hybrid in the US.                        // no longer judges relevance — mustCheckUrls' own
+    Prefer remote or hybrid in the US.                        // no longer judges relevance — urlGroups' own
     Avoid roles requiring more than 8 years of experience.    // LinkedIn filters are trusted for that.
   `,
   concurrency: 1,                     // Reserved for future use; queue workers currently always run at concurrency 1.
@@ -117,7 +125,10 @@ export default {
     search: '',                       // agent (src/prompts/) — one-off rules ("skip company X") without
     easyApply: '',                    // editing the prompt files themselves. '' means nothing added.
   },
-  model: 'opencode-go/deepseek-v4-flash',  // 'provider/model' — see Model notes below.
+  model: 'opencode-go/deepseek-v4-flash',  // Default/fallback 'provider/model' — see Model notes below.
+  models: {                           // Optional per-agent overrides — unset falls back to `model` above.
+    // easyApply: 'opencode-go/deepseek-v4-pro',  // e.g. a stronger model only for Easy Apply form-filling.
+  },
   notifySummaryIntervalMinutes: 30,   // Batches external-job-found / easy-apply-result counts into one
                                        // desktop notification every N minutes, instead of one per event.
   search: {
@@ -128,9 +139,9 @@ export default {
 }
 ```
 
-There is no cap on jobs scanned per run — a search URL stops being paginated when its result relevance ratio drops too low or it runs out of pages, not after a fixed count.
+There is no cap on jobs scanned per run — a search URL stops being paginated when its result relevance ratio drops too low or it runs out of pages (unless `scanFullList: true`, which always scans to the end), not after a fixed count.
 
-`model` and every `search.*` number can also be changed at runtime without restarting, via `/set model <name>`, `/set minNavDelayMs <ms>`, etc.
+The default `model` and every `search.*` number can be changed at runtime without restarting, via `/set model <name>`, `/set minNavDelayMs <ms>`, etc. Everything else in this file — `urlGroups`, `models` (per-agent overrides), `requirements`, `extraPrompts`, `notifySummaryIntervalMinutes` — needs either a restart (`bun start`) or `/reload-config` to pick up an edit. `resume.md` and `profile.json` are the exception: both are re-read from disk on every job/scan, so edits to those two files apply immediately with no restart or reload needed.
 
 ### `profile.json`
 
@@ -155,7 +166,9 @@ Free text — your resume, in Markdown or plain text. Used as LLM context for re
 
 ### Model notes
 
-`model` is a `'provider/model'` string resolved by Mastra's model router against your `OPENCODE_API_KEY`. This project defaults every agent to **`opencode-go/deepseek-v4-flash`** — fast, cheap, and sufficient since none of the agents need image/vision understanding (they read pages as structured accessibility snapshots, not screenshots). If you need a vision-capable model for some reason, `opencode-go/mimo-v2.5` is available from the same provider.
+`model` and each entry in `models` are `'provider/model'` strings resolved by Mastra's model router against your `OPENCODE_API_KEY`. This project defaults every agent to **`opencode-go/deepseek-v4-flash`** — fast, cheap, and sufficient since none of the agents need image/vision understanding (they read pages as structured accessibility snapshots, not screenshots). If you need a vision-capable model for some reason, `opencode-go/mimo-v2.5` is available from the same provider.
+
+Four agent kinds can be overridden independently via `models`: `search` (the LinkedIn navigator), `judge` (per-job relevance judging), `career` (career-page scanning), and `easyApply` (Easy Apply form-filling). Any kind left unset falls back to the top-level `model`. A common reason to override: `easyApply` involves actually filling out forms and answering free-text questions, so it's worth pointing at a stronger model even if you keep the rest on the cheap default.
 
 ## Usage
 
@@ -167,11 +180,12 @@ Once `/verify-login` succeeds, every command below is available. Commands are sc
 | `/tab [search\|easy\|external\|careers]` | global | Switch the active tab (no arg opens a picker) |
 | `/theme [name]` | global | Switch color theme (no arg opens a picker) |
 | `/set <setting> <value>` | global | Change a runtime setting (`concurrency`, `model`, `minNavDelayMs`, `maxNavDelayMs`, `loopCooldownMs`) without restarting |
+| `/reload-config` | global | Re-read `linkedin-auto.config.ts` (url groups, per-agent models, prompts, requirements) without restarting |
 | `/help` | global | List commands available on the current tab |
 | `/exit` | global | Close the browser and quit (`Ctrl+Q` also works) |
-| `/search-urls` | search | Run the URLs from `linkedin-auto.config.ts`'s `mustCheckUrls` |
+| `/search-urls` | search | Pick a `urlGroups` group (or "All groups") and run it |
 | `/stop-search` | search | Stop an in-progress search run |
-| `/auto-on loop` / `/auto-on interval <1h30m>` | search | Repeatedly run `mustCheckUrls` and keep the Easy Apply worker started |
+| `/auto-on loop` / `/auto-on interval <1h30m>` | search | Pick a `urlGroups` group (or "All groups"), repeatedly run it, and keep the Easy Apply worker started |
 | `/auto-off` | search | Stop the auto-mode loop/interval |
 | `/process-easy-queue` | easy | Start working through queued Easy Apply jobs |
 | `/stop-easy-queue` | easy | Stop the Easy Apply worker |

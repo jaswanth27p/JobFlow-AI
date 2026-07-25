@@ -49,6 +49,11 @@ async function getEasyApplyBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: s
       // the search agent's tab back when this browser was shared with it.
       excludeTools: ['browser_screenshot', 'browser_tabs'],
     })
+    // AgentBrowser has its own ConsoleLogger, separate from the wrapping
+    // Agent's (silenced elsewhere via __setLogger(noopLogger)) — without
+    // this, tool-level errors (e.g. a Playwright navigation timeout) still
+    // write raw ANSI text to stdout and corrupt the opentui TUI frame.
+    sharedBrowser.__setLogger(noopLogger)
     sharedBrowserCdpUrl = cdpUrl
   }
   return { browser: sharedBrowser, cdpUrl: sharedBrowserCdpUrl }

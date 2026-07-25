@@ -59,6 +59,11 @@ function getCareerBrowser(): AgentBrowser {
       headless: false,
       excludeTools: ['browser_screenshot'],
     })
+    // AgentBrowser has its own ConsoleLogger, separate from the wrapping
+    // Agent's (silenced below at __setLogger(noopLogger)) — without this,
+    // tool-level errors (e.g. a Playwright navigation timeout) still write
+    // raw ANSI text to stdout and corrupt the opentui TUI frame.
+    sharedBrowser.__setLogger(noopLogger)
   }
   return sharedBrowser
 }

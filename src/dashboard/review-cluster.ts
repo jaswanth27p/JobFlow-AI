@@ -1,6 +1,7 @@
 import { normalize } from '../profile/answer-matching.ts'
 import type { GroupedQuestion } from './review-data.ts'
 import { Agent } from '@mastra/core/agent'
+import { noopLogger } from '@mastra/core/logger'
 
 export interface ReviewedPair {
   question: string
@@ -103,6 +104,9 @@ export async function clusterQuestions(questions: string[], model: string): Prom
     instructions: CLUSTER_INSTRUCTIONS,
     model,
   })
+  // Agent defaults to Mastra's ConsoleLogger, which writes raw (ANSI-colored)
+  // errors straight to stdout — corrupts the opentui TUI frame on any error.
+  agent.__setLogger(noopLogger)
 
   const result = await agent.generate(`Questions to group:\n${questions.map((q) => `- ${q}`).join('\n')}`)
   return parseClusterResponse(result.text, questions)

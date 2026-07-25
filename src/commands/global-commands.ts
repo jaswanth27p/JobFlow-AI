@@ -175,6 +175,39 @@ export function registerGlobalCommands(): void {
   })
 
   registerCommand({
+    name: 'redraw',
+    scope: 'global',
+    description: 'Force-clear the terminal and repaint the TUI — recovery if a stray raw write ever corrupts the screen and blocks the input box',
+    run: async () => {
+      const { getRenderer, writeRawToTerminal } = await import('../tui/index.tsx')
+      const renderer = getRenderer()
+      if (!renderer) return
+      // Raw terminal reset+clear (RIS + clear screen + clear scrollback) —
+      // needed because corruption here is content actually written into the
+      // real terminal/scrollback outside opentui's own tracked buffer, so a
+      // plain requestRender() (which only repaints cells opentui thinks
+      // changed) can't touch it; confirmed a real terminal resize alone
+      // doesn't clear it either. Must go through writeRawToTerminal, not
+      // process.stdout.write directly — the output guard (tui/index.tsx)
+      // redirects that property to the file logger while the TUI is mounted.
+      writeRawToTerminal('\x1Bc\x1B[H\x1B[2J\x1B[3J\x1B[H')
+      // Bounce the renderer's dimensions by 1 and back — the same full
+      // native-buffer repaint a real terminal resize triggers (see App.tsx's
+      // requestRender createEffect comment), so every opentui-owned cell gets
+      // rewritten fresh on top of the now-blank terminal instead of being
+      // skipped by diffing.
+      const { width, height } = renderer
+      if (height > 1) {
+        renderer.resize(width, height - 1)
+        renderer.resize(width, height)
+      } else {
+        renderer.requestRender()
+      }
+      pushLog(appState.activeTab, 'Redrew the terminal.')
+    },
+  })
+
+  registerCommand({
     name: 'exit',
     scope: 'global',
     description: 'Close the browser and exit the application',

@@ -17,7 +17,7 @@ export function LogPanel(props: { tab: TabId }) {
   return (
     <scrollbox
       border
-      borderColor={theme().borderActive}
+      borderColor={theme().border}
       backgroundColor={theme().backgroundPanel}
       flexGrow={1}
       minHeight={0}

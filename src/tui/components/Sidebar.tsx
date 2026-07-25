@@ -29,7 +29,7 @@ export function Sidebar() {
   return (
     <scrollbox
       border
-      borderColor={theme().borderActive}
+      borderColor={theme().border}
       backgroundColor={theme().backgroundPanel}
       width="100%"
       flexGrow={1}

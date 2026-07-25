@@ -10,3 +10,19 @@ export function isDevLogs(): boolean {
   const v = process.env.DEV_LOGS?.toLowerCase()
   return v === 'true' || v === '1' || v === 'yes'
 }
+
+/**
+ * DEV_CONSOLE controls whether opentui's own console overlay is allowed to
+ * show real error output on an uncaught exception/rejection. Off (the
+ * default): the output guard in src/tui/index.tsx redirects console.* and
+ * raw stdout/stderr writes to the file logger only, and openConsoleOnError
+ * is disabled — errors go to data/app.log and never touch the terminal. On:
+ * the guard is skipped so opentui's native console.* capture stays intact,
+ * and the overlay is allowed to open (and actually show content) on error —
+ * useful while developing, not while actually running the automation. Set
+ * `DEV_CONSOLE=true` (or `1`) in `.env`.
+ */
+export function isDevConsole(): boolean {
+  const v = process.env.DEV_CONSOLE?.toLowerCase()
+  return v === 'true' || v === '1' || v === 'yes'
+}

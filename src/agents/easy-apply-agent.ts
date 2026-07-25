@@ -81,6 +81,26 @@ function createLookupLearnedAnswerTool(config: AppConfig) {
   })
 }
 
+/** Phone is deliberately withheld from the agent's own instructions (see
+ * buildApplyInstructions / withoutPhone in profile/loader.ts) so it never
+ * enters prompt text sent to the model provider. This tool is the only way
+ * the agent gets it — called on demand, right when a form field actually
+ * asks for it, and returned straight from profile.json without ever being
+ * embedded in the system prompt. */
+function createGetPhoneNumberTool(config: AppConfig) {
+  return createTool({
+    id: 'get-phone-number',
+    description:
+      "Get the candidate's phone number. Call this only when a form field actually asks for a phone number — the number is deliberately not included in your instructions above.",
+    inputSchema: z.object({}),
+    outputSchema: z.object({ phone: z.string() }),
+    execute: async () => {
+      const profile = await loadProfile(config.profileFiles.profile)
+      return { phone: profile.contact.phone }
+    },
+  })
+}
+
 function createAskHumanAndRememberTool(config: AppConfig) {
   return createTool({
     id: 'ask-human-and-remember',
@@ -292,6 +312,7 @@ async function processEasyApplyJobInTab(
         inputProcessors: [noOpBrowserContextProcessor],
         tools: {
           lookupLearnedAnswer: createLookupLearnedAnswerTool(config),
+          getPhoneNumber: createGetPhoneNumberTool(config),
           askHumanAndRemember: createAskHumanAndRememberTool(config),
           recordAnswer: createRecordAnswerTool(ctx),
           reportSubmission: createReportSubmissionTool(jobRecord, browser, ctx),

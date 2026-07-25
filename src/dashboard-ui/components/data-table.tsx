@@ -1,6 +1,7 @@
 import * as React from 'react'
 import {
   type ColumnDef,
+  type FilterFn,
   type RowSelectionState,
   type SortingState,
   flexRender,
@@ -41,15 +42,28 @@ export interface DataTableProps<TData> {
    * to survive sorting/filtering and to report the right ids to bulk actions. */
   getRowId?: (row: TData) => string
   bulkActions?: BulkAction<TData>[]
+  /** Keys on TData the search box matches against (e.g. `['jobTitle', 'company',
+   * 'location']`). Omit to fall back to TanStack's default fuzzy match across
+   * every column, including ones like URLs/errors a user never searches by. */
+  searchColumns?: (keyof TData & string)[]
 }
 
 const ALL_STATUSES = '__all__'
 
-export function DataTable<TData>({ columns, data, statusFilter, getRowId, bulkActions }: DataTableProps<TData>) {
+export function DataTable<TData>({ columns, data, statusFilter, getRowId, bulkActions, searchColumns }: DataTableProps<TData>) {
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [globalFilter, setGlobalFilter] = React.useState('')
   const [statusValue, setStatusValue] = React.useState(statusFilter?.defaultValue ?? ALL_STATUSES)
   const [rowSelection, setRowSelection] = React.useState<RowSelectionState>({})
+
+  const scopedFilterFn = React.useMemo<FilterFn<TData> | undefined>(() => {
+    if (!searchColumns || searchColumns.length === 0) return undefined
+    return (row, _columnId, filterValue) => {
+      const term = String(filterValue).toLowerCase().trim()
+      if (!term) return true
+      return searchColumns.some((key) => String(row.original[key] ?? '').toLowerCase().includes(term))
+    }
+  }, [searchColumns])
 
   const filteredData = React.useMemo(() => {
     if (!statusFilter || statusValue === ALL_STATUSES) return data
@@ -81,6 +95,7 @@ export function DataTable<TData>({ columns, data, statusFilter, getRowId, bulkAc
     state: { sorting, globalFilter, rowSelection },
     getRowId: getRowId ? (row) => getRowId(row as TData) : undefined,
     enableRowSelection: Boolean(bulkActions && bulkActions.length > 0),
+    globalFilterFn: scopedFilterFn,
     onSortingChange: setSorting,
     onGlobalFilterChange: setGlobalFilter,
     onRowSelectionChange: setRowSelection,
@@ -111,7 +126,7 @@ export function DataTable<TData>({ columns, data, statusFilter, getRowId, bulkAc
           </Select>
         )}
         <Input
-          placeholder="Search..."
+          placeholder={searchColumns ? `Search ${searchColumns.join(', ')}...` : 'Search...'}
           value={globalFilter}
           onChange={(e) => setGlobalFilter(e.target.value)}
           className="max-w-xs"
@@ -164,9 +179,15 @@ export function DataTable<TData>({ columns, data, statusFilter, getRowId, bulkAc
             ) : (
               table.getRowModel().rows.map((row) => (
                 <TableRow key={row.id} data-state={row.getIsSelected() ? 'selected' : undefined} className="data-[state=selected]:bg-muted/50">
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</TableCell>
-                  ))}
+                  {row.getVisibleCells().map((cell) => {
+                    const value = cell.getValue()
+                    const titleAttr = typeof value === 'string' && value ? value : undefined
+                    return (
+                      <TableCell key={cell.id} title={titleAttr}>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </TableCell>
+                    )
+                  })}
                 </TableRow>
               ))
             )}

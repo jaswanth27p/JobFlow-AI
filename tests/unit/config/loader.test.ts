@@ -3,11 +3,11 @@ import { loadConfig } from '../../../src/config/loader.ts'
 
 describe('loadConfig', () => {
   test('loads and validates sample config', async () => {
-    const config = await loadConfig('./linkedin-auto.config.ts')
-    // Asserts non-empty rather than an exact count — urlGroups is the
-    // user's own live, editable search-URL list, not fixed sample data, so
-    // pinning an exact length here breaks the test every time someone adds
-    // or removes a URL/group from their own config.
+    // Loads the checked-in example config, not the user's live/gitignored
+    // linkedin-auto.config.ts — that file is personal, editable data (its
+    // requirements text has no fixed content), so asserting against it broke
+    // this test every time the user edited their own config.
+    const config = await loadConfig('./linkedin-auto.config.example.ts')
     expect(config.urlGroups.length).toBeGreaterThan(0)
     expect(config.urlGroups[0]!.urls.length).toBeGreaterThan(0)
     expect(config.requirements).toContain('remote')

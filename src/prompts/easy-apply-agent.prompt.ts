@@ -1,4 +1,4 @@
-import { loadResume, loadProfile } from '../profile/loader.ts'
+import { loadResume, loadProfile, withoutPhone } from '../profile/loader.ts'
 import type { AppConfig } from '../config/schema.ts'
 
 export interface ApplyJobRecord {
@@ -10,7 +10,8 @@ export interface ApplyJobRecord {
 
 export async function buildApplyInstructions(config: AppConfig, job: ApplyJobRecord): Promise<string> {
   const resume = await loadResume(config.profileFiles.resume)
-  const { additionalContext, ...profile } = await loadProfile(config.profileFiles.profile)
+  const { additionalContext, ...rest } = await loadProfile(config.profileFiles.profile)
+  const profile = withoutPhone(rest)
 
   const additionalContextBlock =
     additionalContext.length > 0
@@ -40,11 +41,12 @@ to be; the app owns opening/closing this tab for the whole application, includin
 Steps:
 1. Click "Easy Apply" on the current page.
 2. Step through the form. For each field/question, resolve it in this order:
-   a. If it maps directly to a structured profile field above (contact info, work authorization, salary expectation, years of experience, links), use that value directly.
-   b. Otherwise, call lookup-learned-answer with the exact on-page question text. If found is true, use that answer.
-   c. Otherwise, if you can confidently infer the answer from the resume/profile content, answer it yourself.
-   d. Otherwise — a genuine unknown — call ask-human-and-remember with the question, then use the returned answer.
-   e. Regardless of which path (a-d) you used, call record-answer with the question, the answer you used, and which path resolved it (source: "profile", "learned", "inferred", or "human"). This is mandatory for EVERY field — it is the only record of what was actually submitted, for later human review. Do this before moving to the next field.
+   a. If the field asks for a phone number, call get-phone-number and use the returned value. Do not guess, reuse a number seen elsewhere, or leave it blank — this is the only source for it, deliberately kept out of your instructions above.
+   b. Otherwise, if it maps directly to a structured profile field above (email, location, work authorization, salary expectation, years of experience, links), use that value directly.
+   c. Otherwise, call lookup-learned-answer with the exact on-page question text. If found is true, use that answer.
+   d. Otherwise, if you can confidently infer the answer from the resume/profile content, answer it yourself.
+   e. Otherwise — a genuine unknown — call ask-human-and-remember with the question, then use the returned answer.
+   f. Regardless of which path (a-e) you used, call record-answer with the question, the answer you used, and which path resolved it (source: "profile", "learned", "inferred", or "human"). This is mandatory for EVERY field — it is the only record of what was actually submitted, for later human review. Do this before moving to the next field.
 3. If the form has a resume step, LinkedIn Easy Apply reuses a resume already uploaded to the candidate's LinkedIn account — it will be pre-selected automatically. Just confirm/continue past that step; do not try to upload a file. Only if the step shows no resume at all and forces a fresh upload with no way to proceed, call ask-human-and-remember asking the human to attach one manually in the visible browser, then continue once they confirm.
 4. Submit the application once all steps are complete.
 5. Call report-submission with success: true after a successful submission. If you get stuck in a way you cannot resolve, call it with success: false and one of:

@@ -1,10 +1,10 @@
-import { loadResume, loadProfile } from '../profile/loader.ts'
+import { loadResume, loadProfile, withoutPhone } from '../profile/loader.ts'
 import { getCurrentConfig } from '../config/current.ts'
 
 export async function buildPageScanInstructions(pageUrl: string, pageLabel: string): Promise<string> {
   const config = getCurrentConfig()
   const resume = await loadResume(config.profileFiles.resume)
-  const profile = await loadProfile(config.profileFiles.profile)
+  const profile = withoutPhone(await loadProfile(config.profileFiles.profile))
 
   return `
 You are scanning "${pageLabel}"'s external career/jobs listing page (${pageUrl}) in a real,

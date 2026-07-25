@@ -97,6 +97,7 @@ export function ExternalJobsPage() {
         statusFilter={{ columnId: 'status', options: ['external_saved', 'applied'], defaultValue: 'external_saved' }}
         getRowId={(row) => row.id}
         bulkActions={bulkActions}
+        searchColumns={['title', 'company', 'location']}
       />
       {data?.length === 0 && <p className="mt-4 text-muted-foreground">No external jobs saved yet.</p>}
     </div>

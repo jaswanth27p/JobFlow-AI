@@ -1,4 +1,4 @@
-import { loadResume, loadProfile } from '../profile/loader.ts'
+import { loadResume, loadProfile, withoutPhone } from '../profile/loader.ts'
 import { getCurrentConfig } from '../config/current.ts'
 
 /**
@@ -9,7 +9,7 @@ import { getCurrentConfig } from '../config/current.ts'
 export async function buildJudgeInstructions(): Promise<string> {
   const config = getCurrentConfig()
   const resume = await loadResume(config.profileFiles.resume)
-  const profile = await loadProfile(config.profileFiles.profile)
+  const profile = withoutPhone(await loadProfile(config.profileFiles.profile))
 
   const extraBlock = config.extraPrompts.search.trim()
     ? `\nAdditional instructions from the user (set via extraPrompts.search in linkedin-auto.config.ts — treat as authoritative, let it override anything below where they conflict):\n${config.extraPrompts.search.trim()}\n`

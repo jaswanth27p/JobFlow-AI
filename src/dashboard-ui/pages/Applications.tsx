@@ -135,6 +135,7 @@ export function ApplicationsPage() {
         statusFilter={{ columnId: 'status', options: ['applied', 'failed', 'needs_input'] }}
         getRowId={(row) => row.jobId}
         bulkActions={bulkActions}
+        searchColumns={['jobTitle', 'company', 'location']}
       />
     </div>
   )

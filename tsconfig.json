@@ -14,5 +14,6 @@
     "jsxImportSource": "@opentui/solid",
     "types": ["bun", "node"]
   },
-  "include": ["src/**/*", "tests/**/*", "linkedin-auto.config.ts", "drizzle.config.ts"]
+  "include": ["src/**/*", "tests/**/*", "linkedin-auto.config.ts", "drizzle.config.ts"],
+  "exclude": ["src/dashboard-ui/**/*"]
 }

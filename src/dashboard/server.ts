@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { eq, desc, gte, sql, inArray } from 'drizzle-orm'
+import { eq, desc, gte, sql, inArray, and } from 'drizzle-orm'
 import { getDb } from '../db/index.ts'
-import { jobs, applications, searchRuns, answerReviews, careerPages, careerPageScans } from '../db/schema.ts'
+import { jobs, applications, answerReviews, careerPages, careerPageScans } from '../db/schema.ts'
 import { getApplyQueueCounts } from '../queues/apply-queues.ts'
 import { getCurrentConfig } from '../config/current.ts'
 import { saveLearnedAnswer } from '../profile/loader.ts'
@@ -48,21 +48,21 @@ async function getSummary(): Promise<SummaryDto> {
   const db = getDb()
   const since = startOfToday()
 
-  const todayRuns = await db.select().from(searchRuns).where(gte(searchRuns.startedAt, since))
-  const scanned = todayRuns.reduce((sum, r) => sum + r.scannedCount, 0)
-  const found = todayRuns.reduce((sum, r) => sum + r.relevantCount, 0)
-
   const todayApps = await db.select().from(applications).where(gte(applications.createdAt, since))
   const applied = todayApps.filter((a) => a.status === 'applied').length
   const failed = todayApps.filter((a) => a.status === 'failed').length
 
+  const todayExternal = await db
+    .select()
+    .from(jobs)
+    .where(and(eq(jobs.status, 'external_saved'), gte(jobs.createdAt, since)))
+  const externalSaved = todayExternal.length
+
   const easyCounts = await getApplyQueueCounts()
 
   return {
-    scanned,
-    found,
-    runCount: todayRuns.length,
     applied,
+    externalSaved,
     failed,
     queueWaiting: easyCounts.waiting,
     queueActive: easyCounts.active,

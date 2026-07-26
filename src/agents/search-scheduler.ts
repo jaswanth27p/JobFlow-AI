@@ -1,6 +1,7 @@
 import { appState, pushLog } from '../state/app-state.ts'
 import { runSearchUrls, isSearchRunning, stopSearchAndWait, type ScanUrlEntry } from './search-agent.ts'
 import { startEasyApplyWorker } from '../queues/easy-apply-worker.ts'
+import { startJudgeWorker } from '../queues/judge-worker.ts'
 import { logger } from '../utils/logger.ts'
 import { summarizeError } from '../utils/error-summary.ts'
 import type { TabId } from '../state/types.ts'
@@ -148,10 +149,13 @@ async function runIntervalTick(): Promise<void> {
   await work
 }
 
-/** Starts the easy-apply queue worker if it isn't already running — idempotent
- * no-op when already started, so this is safe to call unconditionally. */
+/** Starts the easy-apply and judge queue workers if they aren't already
+ * running — idempotent no-op when already started, so this is safe to call
+ * unconditionally. Both are long-running consumers, started once per app
+ * session rather than per scan cycle, same as each other. */
 function ensureApplyWorkersRunning(): void {
   startEasyApplyWorker()
+  startJudgeWorker()
 }
 
 export function startAutoMode(mode: AutoMode, entries: ScanUrlEntry[], groupLabel: string, intervalMs?: number): void {

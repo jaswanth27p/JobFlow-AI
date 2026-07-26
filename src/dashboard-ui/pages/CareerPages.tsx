@@ -24,7 +24,13 @@ export function CareerPagesPage() {
   return (
     <div>
       <h1 className="mb-6 text-2xl font-semibold">Career Pages</h1>
-      <DataTable columns={columns} data={data ?? []} getRowId={(row) => row.id} searchColumns={['label']} />
+      <DataTable
+        columns={columns}
+        data={data ?? []}
+        dateFilter={{ columnId: 'addedAt', label: 'Added' }}
+        getRowId={(row) => row.id}
+        searchColumns={['label']}
+      />
       {data?.length === 0 && <p className="mt-4 text-muted-foreground">No career pages tracked yet — use /add-career-url.</p>}
     </div>
   )

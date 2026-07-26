@@ -1,78 +1,125 @@
 import { describe, test, expect } from 'bun:test'
 import {
-  computeMidPageContinueDecision,
-  computeRelevanceContinueDecision,
+  mergeChecklistIds,
+  shouldStopScrolling,
+  shouldRetryPageCollection,
+  isDuplicatePage,
+  isLastPage,
+  detectCheckpointUrl,
+  FULL_PAGE_SIZE,
 } from '../../../src/agents/search-agent.ts'
-import { buildScanInstructions } from '../../../src/prompts/search-agent.prompt.ts'
 
-describe('computeMidPageContinueDecision', () => {
-  test('continues when nothing has been scanned yet', () => {
-    expect(computeMidPageContinueDecision({ scanned: 0, aborted: false })).toBe(true)
+describe('mergeChecklistIds', () => {
+  test('appends new ids without disturbing existing order', () => {
+    expect(mergeChecklistIds(['1', '2'], ['2', '3', '1', '4'])).toEqual(['1', '2', '3', '4'])
   })
 
-  test('stops immediately when aborted', () => {
-    expect(computeMidPageContinueDecision({ scanned: 1, aborted: true })).toBe(false)
+  test('no-op when nothing new appears', () => {
+    expect(mergeChecklistIds(['1', '2', '3'], ['2', '1'])).toEqual(['1', '2', '3'])
   })
 
-  test('stops once the per-run job cap is reached', () => {
-    expect(computeMidPageContinueDecision({ scanned: 25, aborted: false, maxJobsPerRun: 25 })).toBe(false)
+  test('starting from empty just adopts DOM order', () => {
+    expect(mergeChecklistIds([], ['5', '6', '7'])).toEqual(['5', '6', '7'])
   })
 
-  test('keeps going below the cap', () => {
-    expect(computeMidPageContinueDecision({ scanned: 10, aborted: false, maxJobsPerRun: 25 })).toBe(true)
-  })
-
-  test('no cap applied when maxJobsPerRun is omitted', () => {
-    expect(computeMidPageContinueDecision({ scanned: 1000, aborted: false })).toBe(true)
+  test('empty DOM result changes nothing', () => {
+    expect(mergeChecklistIds(['1', '2'], [])).toEqual(['1', '2'])
   })
 })
 
-describe('computeRelevanceContinueDecision', () => {
-  test('continues when the page has not been scanned yet', () => {
-    expect(computeRelevanceContinueDecision({ pageScanned: 0, pageRelevant: 0, threshold: 0.25 })).toBe(true)
+describe('shouldStopScrolling', () => {
+  test('keeps scrolling when not at the bottom yet and under a full page, regardless of new-id streak', () => {
+    expect(shouldStopScrolling(false, 5, 10)).toBe(false)
   })
 
-  test('continues when the ratio is above the threshold', () => {
-    expect(computeRelevanceContinueDecision({ pageScanned: 10, pageRelevant: 5, threshold: 0.25 })).toBe(true)
+  test('keeps scrolling at the bottom if the no-new streak is short', () => {
+    expect(shouldStopScrolling(true, 1, 25)).toBe(false)
   })
 
-  test('continues when the ratio is exactly at the threshold', () => {
-    expect(computeRelevanceContinueDecision({ pageScanned: 8, pageRelevant: 2, threshold: 0.25 })).toBe(true)
+  test('stops once at the bottom AND two consecutive reads added nothing new', () => {
+    expect(shouldStopScrolling(true, 2, 10)).toBe(true)
   })
 
-  test('stops when the ratio is below the threshold', () => {
-    expect(computeRelevanceContinueDecision({ pageScanned: 10, pageRelevant: 1, threshold: 0.25 })).toBe(false)
+  test('a longer no-new streak at the bottom still stops', () => {
+    expect(shouldStopScrolling(true, 5, 10)).toBe(true)
   })
 
-  test('single relevant job on a single-job page continues', () => {
-    expect(computeRelevanceContinueDecision({ pageScanned: 1, pageRelevant: 1, threshold: 0.25 })).toBe(true)
+  test('stops once a full page is collected even if atBottom never reports true — the production bug this fixes', () => {
+    expect(shouldStopScrolling(false, 2, FULL_PAGE_SIZE)).toBe(true)
   })
 
-  test('single irrelevant job on a single-job page stops', () => {
-    expect(computeRelevanceContinueDecision({ pageScanned: 1, pageRelevant: 0, threshold: 0.25 })).toBe(false)
-  })
-
-  test('scanFullList bypasses the ratio check even when it would otherwise stop', () => {
-    expect(
-      computeRelevanceContinueDecision({ pageScanned: 10, pageRelevant: 0, threshold: 0.25, scanFullList: true }),
-    ).toBe(true)
-  })
-
-  test('scanFullList defaults to off (unset behaves like false)', () => {
-    expect(computeRelevanceContinueDecision({ pageScanned: 10, pageRelevant: 1, threshold: 0.25 })).toBe(false)
+  test('a full page count alone does not stop it early — still needs the no-new streak', () => {
+    expect(shouldStopScrolling(false, 0, FULL_PAGE_SIZE)).toBe(false)
   })
 })
 
-describe('buildScanInstructions', () => {
-  test('describes the dedupe-first, navigate-only flow (no relevance judging)', () => {
-    const instructions = buildScanInstructions()
-    expect(instructions).toContain('check-already-seen')
-    expect(instructions).toContain('judge-and-report-job')
-    expect(instructions).toContain('check-page-relevance-ratio')
-    expect(instructions).toContain('interactiveOnly: true')
-    // The navigator must never be told to judge relevance itself — that's the
-    // isolated job-relevance-judge's job, called per job with no carryover.
-    expect(instructions).not.toContain('verdict')
-    expect(instructions).not.toContain('resume')
+describe('shouldRetryPageCollection', () => {
+  test('never retries a page that came back completely empty — that is a genuine end signal, not a skip', () => {
+    expect(shouldRetryPageCollection(0, true)).toBe(false)
+  })
+
+  test('retries an undercounted page that was not flagged as genuinely empty', () => {
+    expect(shouldRetryPageCollection(18, false)).toBe(true)
+  })
+
+  test('does not retry once the full page size was collected', () => {
+    expect(shouldRetryPageCollection(FULL_PAGE_SIZE, false)).toBe(false)
+  })
+
+  test('does not retry when more than a full page was collected (defensive)', () => {
+    expect(shouldRetryPageCollection(FULL_PAGE_SIZE + 1, false)).toBe(false)
+  })
+})
+
+describe('isDuplicatePage', () => {
+  test('false when there is no previous page to compare against', () => {
+    expect(isDuplicatePage(['1', '2'], [])).toBe(false)
+  })
+
+  test('false when the current page came back empty', () => {
+    expect(isDuplicatePage([], ['1', '2'])).toBe(false)
+  })
+
+  test('true when every current id already appeared on the previous page', () => {
+    expect(isDuplicatePage(['1', '2'], ['1', '2', '3'])).toBe(true)
+  })
+
+  test('false when at least one current id is new relative to the previous page', () => {
+    expect(isDuplicatePage(['1', '2', '99'], ['1', '2', '3'])).toBe(false)
+  })
+})
+
+describe('isLastPage', () => {
+  test('true when the page came back with zero cards', () => {
+    expect(isLastPage([], ['1', '2'])).toBe(true)
+  })
+
+  test('true when the page is a clamped duplicate of the previous one', () => {
+    const ids = Array.from({ length: FULL_PAGE_SIZE }, (_, i) => String(i))
+    expect(isLastPage(ids, ids)).toBe(true)
+  })
+
+  test('true when the page count is under a full page and not a duplicate', () => {
+    expect(isLastPage(['1', '2', '3'], ['100', '101'])).toBe(true)
+  })
+
+  test('false for a full, non-duplicate page — more pages likely follow', () => {
+    const ids = Array.from({ length: FULL_PAGE_SIZE }, (_, i) => String(i))
+    const previous = Array.from({ length: FULL_PAGE_SIZE }, (_, i) => String(i + 1000))
+    expect(isLastPage(ids, previous)).toBe(false)
+  })
+})
+
+describe('detectCheckpointUrl', () => {
+  test('flags a LinkedIn checkpoint redirect', () => {
+    expect(detectCheckpointUrl('https://www.linkedin.com/checkpoint/challenge/')).toContain('checkpoint')
+  })
+
+  test('flags an authwall redirect', () => {
+    expect(detectCheckpointUrl('https://www.linkedin.com/authwall?trk=x')).toContain('checkpoint')
+  })
+
+  test('leaves a normal jobs search URL alone', () => {
+    expect(detectCheckpointUrl('https://www.linkedin.com/jobs/search/?keywords=engineer')).toBeNull()
   })
 })

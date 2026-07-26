@@ -7,7 +7,7 @@ import type { TabId } from '../../state/types.ts'
 const TAB_LABELS: Record<TabId, string> = {
   search: 'Search',
   easy: 'Easy Apply',
-  external: 'External Jobs',
+  judge: 'Judge Queue',
   careers: 'Career Pages',
 }
 

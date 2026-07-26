@@ -50,8 +50,8 @@ describe('dashboard handleRequest /api/*', () => {
     const res = await handleRequest(new Request('http://localhost/api/summary'))
     expect(res.status).toBe(200)
     const body = (await res.json()) as Record<string, unknown>
-    expect(typeof body.scanned).toBe('number')
     expect(typeof body.applied).toBe('number')
+    expect(typeof body.externalSaved).toBe('number')
   })
 
   test('GET /api/applications returns an array', async () => {

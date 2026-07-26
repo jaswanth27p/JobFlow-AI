@@ -5,10 +5,8 @@ import type { QuestionCluster } from './review-cluster.ts'
 export type { GroupedQuestion, QuestionCluster, RecordedAnswer }
 
 export interface SummaryDto {
-  scanned: number
-  found: number
-  runCount: number
   applied: number
+  externalSaved: number
   failed: number
   queueWaiting: number
   queueActive: number

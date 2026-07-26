@@ -95,6 +95,7 @@ export function ExternalJobsPage() {
         columns={columns}
         data={data ?? []}
         statusFilter={{ columnId: 'status', options: ['external_saved', 'applied'], defaultValue: 'external_saved' }}
+        dateFilter={{ columnId: 'createdAt', label: 'Found' }}
         getRowId={(row) => row.id}
         bulkActions={bulkActions}
         searchColumns={['title', 'company', 'location']}

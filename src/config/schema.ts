@@ -8,10 +8,10 @@ export const appConfigSchema = z.object({
     name: z.string().min(1),
     urls: z.array(z.object({
       url: z.url(),
-      /** When true, the search agent's check-page-relevance-ratio gate
-       * (src/agents/search-agent.ts) is bypassed for this URL — it always
-       * keeps paginating instead of stopping once a page's relevance ratio
-       * drops too low, so it scans the entire result list. */
+      /** Currently a no-op: the search agent (src/agents/search-agent.ts) has
+       * no relevance-ratio pagination gate anymore — every URL always scans
+       * its entire result list regardless of this flag. Kept on the schema so
+       * existing linkedin-auto.config.ts files with this field still parse. */
       scanFullList: z.boolean().default(false),
     })),
   })).default([]),

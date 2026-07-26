@@ -30,7 +30,7 @@ export function registerGlobalCommands(): void {
   registerCommand({
     name: 'tab',
     scope: 'global',
-    description: '/tab [search|easy|external|careers] — switch tab (no arg opens a picker)',
+    description: '/tab [search|easy|judge|careers] — switch tab (no arg opens a picker)',
     run: (ctx) => {
       const target = ctx.args[0] as TabId | undefined
       // No argument → open the centered picker dialog.

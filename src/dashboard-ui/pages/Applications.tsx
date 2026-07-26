@@ -133,6 +133,7 @@ export function ApplicationsPage() {
         columns={columns}
         data={data ?? []}
         statusFilter={{ columnId: 'status', options: ['applied', 'failed', 'needs_input'] }}
+        dateFilter={{ columnId: 'createdAt', label: 'Applied' }}
         getRowId={(row) => row.jobId}
         bulkActions={bulkActions}
         searchColumns={['jobTitle', 'company', 'location']}

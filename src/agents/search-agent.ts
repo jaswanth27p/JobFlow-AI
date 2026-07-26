@@ -1,40 +1,35 @@
 import { randomUUID } from 'node:crypto'
-import { eq } from 'drizzle-orm'
-import { z } from 'zod'
-import { Agent } from '@mastra/core/agent'
+import { eq, inArray } from 'drizzle-orm'
 import { noopLogger } from '@mastra/core/logger'
-import { createTool } from '@mastra/core/tools'
 import { AgentBrowser } from '@mastra/agent-browser'
-import type { ToolCallChunk, ToolResultChunk } from '@mastra/core/stream'
+import type { Page } from 'playwright-core'
 import { getSharedCdpUrl } from '../browser/session.ts'
-import { reclaimOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
+import { openOwnTab, closeOwnTab, reclaimOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, searchRuns } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
 import { waitForAnswer } from '../state/prompt-channel.ts'
-import { enqueueApplyJob } from '../queues/apply-queues.ts'
-import { recordExternalJobFound } from '../notify/summary-aggregator.ts'
-import { noOpBrowserContextProcessor } from './no-op-browser-context-processor.ts'
+import { enqueueJudgeJob } from '../queues/judge-queues.ts'
 import { logger } from '../utils/logger.ts'
-import { isDevLogs } from '../utils/dev-mode.ts'
 import { summarizeError } from '../utils/error-summary.ts'
-import { applyUrlToJobId } from '../utils/apply-url-hash.ts'
-import { buildScanInstructions } from '../prompts/search-agent.prompt.ts'
-import { judgeJob } from './job-relevance-judge.ts'
-import { getCurrentConfig } from '../config/current.ts'
-import { resolveModel } from '../config/resolve-model.ts'
 
 const SEARCH_TAB = 'search' as const
 
-/** Minimum fraction of a page's jobs (new + already-seen, combined) that must be
- * judged relevant for the agent to keep paginating this search URL. */
-const RELEVANCE_CONTINUE_THRESHOLD = 0.25
+/** Both attributes LinkedIn has used to carry a job card's numeric id — try
+ * the occludable one first, fall back to the plain one. */
+const JOB_ID_ATTR_SELECTOR = '[data-occludable-job-id], [data-job-id]'
 
-/** Browser tools that actually hit LinkedIn over the network — these are the
- * ones we pace to stay under LinkedIn's automation-detection thresholds. Local
- * tools (snapshot/evaluate/screenshot) inspect the already-loaded page and are
- * not throttled. */
-const NAVIGATION_TOOLS = new Set(['browser_goto', 'browser_click', 'browser_tabs'])
+/** Every page of LinkedIn job search results holds exactly this many cards
+ * except a genuine last page, which can be shorter (including possibly the
+ * very first/only page, if total results are under this). Drives both the
+ * undercount-retry check and the last-page detection below. */
+export const FULL_PAGE_SIZE = 25
+
+/** Hard circuit breaker against a genuinely stuck/looping scan (e.g. a bug in
+ * the last-page detection that never trips) — 200 pages is 5,000 jobs, far
+ * more than any single configured URL should ever legitimately have. Same
+ * role maxSteps/MAX_RESUME_ATTEMPTS play elsewhere in this codebase. */
+const MAX_PAGES_PER_URL = 200
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   if (ms <= 0 || signal.aborted) return Promise.resolve()
@@ -63,18 +58,10 @@ let sharedBrowser: AgentBrowser | null = null
 
 function getSearchBrowser(): AgentBrowser {
   if (!sharedBrowser) {
-    // Default model (opencode-go/deepseek-v4-flash) is text-only — drop the
-    // screenshot tool so the agent never hands it an image it can't read.
-    sharedBrowser = new AgentBrowser({
-      cdpUrl: getSharedCdpUrl(),
-      scope: 'shared',
-      headless: false,
-      excludeTools: ['browser_screenshot'],
-    })
-    // AgentBrowser has its own ConsoleLogger, separate from the wrapping
-    // Agent's (silenced below at __setLogger(noopLogger)) — without this,
-    // tool-level errors (e.g. a Playwright navigation timeout) still write
-    // raw ANSI text to stdout and corrupt the opentui TUI frame.
+    sharedBrowser = new AgentBrowser({ cdpUrl: getSharedCdpUrl(), scope: 'shared', headless: false })
+    // AgentBrowser has its own ConsoleLogger — without this, tool-level errors
+    // (e.g. a Playwright navigation timeout) still write raw ANSI text to
+    // stdout and corrupt the opentui TUI frame.
     sharedBrowser.__setLogger(noopLogger)
   }
   return sharedBrowser
@@ -103,330 +90,303 @@ export async function stopSearchAndWait(): Promise<void> {
 /** One search URL plus its per-URL full-list-scan flag — see runSearchUrls. */
 export interface ScanUrlEntry {
   url: string
-  /** When true, check-page-relevance-ratio always allows continuing —
-   * relevance drop-off never ends this URL's scan early, it only stops when
-   * it genuinely runs out of cards/pages. */
+  /** Currently a no-op: the scan loop always walks every URL to its genuine
+   * end (no relevance-ratio early stop exists). Kept on the type/config so
+   * entries built from existing linkedin-auto.config.ts files still parse. */
   scanFullList: boolean
 }
 
 interface ScanRunContext {
   signal: AbortSignal
-  scanned: number
-  queued: number
-  externalSaved: number
-  skipped: number
-  /** Jobs judged (new or already-seen) on the CURRENT page/batch — reset per
-   * search URL and per page boundary, see computeRelevanceContinueDecision. */
-  pageScanned: number
-  pageRelevant: number
-  /** The tab this run's current search URL is open in. The easy-apply agent
-   * opening its own tab (see tab-guard.ts) can silently steal this agent's
-   * "active tab" pointer the same way — logSearchStep reclaims it every step. */
-  ownTab: OwnedTab | null
-  /** The search URL currently being scanned — set once per URL in the run
-   * loop below, read by judge-and-report-job so the navigating agent never
-   * has to pass it through a tool call itself. */
-  currentSourceUrl: string
-  /** This URL's scanFullList flag — set once per URL in the run loop below,
-   * read by check-page-relevance-ratio to decide whether to bypass its gate. */
-  currentScanFullList: boolean
+  /** Every job id encountered across every page of every URL this run,
+   * new + already-seen combined — mirrors searchRuns.scannedCount. */
+  totalIdsSeen: number
+  /** Subset of totalIdsSeen already recorded in a previous run — mirrors
+   * searchRuns.skippedCount (nothing is actually "skipped" by the scan loop
+   * itself anymore; this is what it declined to re-queue). */
+  alreadySeen: number
+  /** New job ids handed off to the judge queue this run — mirrors
+   * searchRuns.relevantCount (a proxy: "found and worth judging", not yet an
+   * actual relevance verdict, which the judge worker produces later). */
+  queuedForJudge: number
 }
 
-function formatToolArgs(args: unknown): string {
-  if (!args || typeof args !== 'object') return ''
-  const parts = Object.entries(args as Record<string, unknown>)
-    .filter(([key]) => key !== '__mastraMetadata')
-    .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
-  return parts.length > 0 ? ` (${parts.join(', ')})` : ''
-}
-
-/**
- * Logs every tool call/result of an agent step, and — critically — enforces the
- * inter-navigation rate limit. The raw `→ tool` / `← tool` trace is developer
- * noise: it only reaches the TUI log panel when DEV_LOGS is on. The natural-
- * language flow a normal user reads is emitted by the tools themselves, not
- * here. Regardless of DEV_LOGS, the full trace always goes to the on-disk log
- * file so a stalled run is still diagnosable.
- *
- * This is an `onStepFinish` handler; Mastra awaits it, so awaiting a sleep here
- * throttles the whole agent loop in code — it does NOT depend on the model
- * choosing to pace itself. Any step that issued a network-hitting browser
- * navigation earns a randomized human-like pause before the next step runs.
- */
-async function logSearchStep(
-  event: { toolCalls: ToolCallChunk[]; toolResults: ToolResultChunk[] },
-  signal: AbortSignal,
-  ctx: ScanRunContext,
-  browser: AgentBrowser,
-): Promise<void> {
-  if (ctx.ownTab) await reclaimOwnTab(browser, getSharedCdpUrl(), ctx.ownTab)
-
-  const devLogs = isDevLogs()
-  let navigated = false
-  for (const call of event.toolCalls) {
-    if (devLogs) pushLog(SEARCH_TAB, `→ ${call.payload.toolName}${formatToolArgs(call.payload.args)}`)
-    logger.info({ tool: call.payload.toolName, args: call.payload.args }, 'search: tool call')
-    if (NAVIGATION_TOOLS.has(call.payload.toolName)) navigated = true
-  }
-  for (const result of event.toolResults) {
-    const status = result.payload.isError ? 'error' : 'ok'
-    if (devLogs) pushLog(SEARCH_TAB, `← ${result.payload.toolName} (${status})`)
-    logger.info(
-      { tool: result.payload.toolName, isError: result.payload.isError, result: result.payload.result },
-      'search: tool result',
-    )
-  }
-
-  if (navigated && !signal.aborted) {
-    const delay = randomNavDelayMs()
-    if (delay > 0) {
-      if (devLogs) pushLog(SEARCH_TAB, `(pausing ${(delay / 1000).toFixed(1)}s to stay under LinkedIn rate limits)`)
-      logger.info({ delayMs: delay }, 'search: rate-limit pause')
-      await sleep(delay, signal)
+/** Merges freshly-DOM-queried job ids into a page's running collected order,
+ * appending only ids not already known (existing order/position is never
+ * disturbed). Pure so it's testable. */
+export function mergeChecklistIds(existingOrder: string[], domIds: string[]): string[] {
+  const known = new Set(existingOrder)
+  const merged = existingOrder.slice()
+  for (const id of domIds) {
+    if (!known.has(id)) {
+      known.add(id)
+      merged.push(id)
     }
   }
+  return merged
 }
 
-/** Hard mid-page stop condition only — abort. Runs regardless of any page's
- * relevance ratio (see computeRelevanceContinueDecision for that separate,
- * page-boundary check). Still accepts an optional maxJobsPerRun cap for
- * testability, but nothing in the app wires one up — there is no job-count
- * limit; check-page-relevance-ratio and running out of results/pages are what
- * actually stop a scan. Pure so it's testable. */
-export function computeMidPageContinueDecision(ctx: {
-  scanned: number
-  aborted: boolean
-  /** Optional hard cap on jobs opened per run (LinkedIn rate-limit guard). Omit for no cap. */
-  maxJobsPerRun?: number
-}): boolean {
-  if (ctx.aborted) return false
-  if (ctx.maxJobsPerRun !== undefined && ctx.scanned >= ctx.maxJobsPerRun) return false
-  return true
+/** Whether to stop scrolling within a single loaded page. Two consecutive
+ * reads adding no new ids is required either way (avoids a false stop if one
+ * scroll step happens to land in a dead zone before a card near the bottom
+ * has actually mounted) — combined with EITHER the container genuinely
+ * reaching its scroll bottom, OR already having collected a full page's
+ * worth of ids. The second alternative matters because atBottom detection
+ * can be wrong for a given page's DOM structure (trailing content past the
+ * last card, or the scroll-container walk landing on the wrong element) —
+ * observed in production as a page that had already found all
+ * FULL_PAGE_SIZE ids but never reported atBottom, scrolling uselessly until
+ * the MAX_SCROLL_STEPS_PER_PASS safety cap gave up. Once a full page is
+ * collected there's nothing left to wait for regardless of what atBottom
+ * says. Pure so it's testable. */
+export function shouldStopScrolling(atBottom: boolean, consecutiveNoNewReads: number, collectedCount: number): boolean {
+  if (consecutiveNoNewReads < 2) return false
+  return atBottom || collectedCount >= FULL_PAGE_SIZE
 }
 
-/** Page-boundary gate: whether to keep paginating this search URL, based on
- * what fraction of the page's jobs (new + already-seen) were relevant. An
- * already-seen job counts via its stored status — see check-already-seen.
- * scanFullList (the per-URL config flag) bypasses the ratio check entirely —
- * always continue, only running out of cards/pages ends the URL. Pure so
+/** Whether a page's collected-id count is suspicious enough to warrant a
+ * second, finer-grained scroll pass rather than trusting it as final. Every
+ * page is exactly FULL_PAGE_SIZE jobs except a genuine last page — an
+ * undercount without a hard end-of-results signal (a page that came back
+ * completely empty) is treated as a probable scroll skip, not a fact. Pure so
  * it's testable. */
-export function computeRelevanceContinueDecision(ctx: {
-  pageScanned: number
-  pageRelevant: number
-  threshold: number
-  scanFullList?: boolean
-}): boolean {
-  if (ctx.scanFullList) return true
-  if (ctx.pageScanned === 0) return true
-  return ctx.pageRelevant / ctx.pageScanned >= ctx.threshold
+export function shouldRetryPageCollection(collectedCount: number, pageWasCompletelyEmpty: boolean): boolean {
+  if (pageWasCompletelyEmpty) return false
+  return collectedCount < FULL_PAGE_SIZE
 }
 
-function createCheckAlreadySeenTool(ctx: ScanRunContext) {
-  return createTool({
-    id: 'check-already-seen',
-    description:
-      "Check whether a LinkedIn job posting has already been recorded in a previous run. Call this BEFORE reading anything else about a card, using the numeric job id from its URL (the digits after /jobs/view/) or its data-occludable-job-id/data-job-id attribute. If seen is true, skip this card immediately — do not read its detail pane, do not call judge-and-report-job for it.",
-    inputSchema: z.object({ jobId: z.string() }),
-    outputSchema: z.object({ seen: z.boolean() }),
-    execute: async ({ jobId }) => {
-      const db = getDb()
-      const rows = await db.select({ id: jobs.id, status: jobs.status }).from(jobs).where(eq(jobs.id, jobId))
-      const seen = rows.length > 0
-      if (seen) {
-        pushLog(SEARCH_TAB, `Skipping a job (id ${jobId}) — already recorded in an earlier run.`)
-        ctx.pageScanned++
-        // A previously skipped/failed job wasn't worth pursuing then either —
-        // doesn't count in this page's favor. Everything else (queued,
-        // external_saved, needs_input, applied, discovered) does.
-        if (rows[0].status !== 'skipped' && rows[0].status !== 'failed') ctx.pageRelevant++
-      }
-      return { seen }
-    },
-  })
+/** Detects LinkedIn clamping an out-of-range start= back to its last valid
+ * page (silently re-serving the same cards) — true when every id on the
+ * current page was already present on the immediately previous page. Pure so
+ * it's testable. */
+export function isDuplicatePage(currentPageIds: string[], previousPageIds: string[]): boolean {
+  if (currentPageIds.length === 0 || previousPageIds.length === 0) return false
+  const previous = new Set(previousPageIds)
+  return currentPageIds.every((id) => previous.has(id))
 }
 
-/**
- * For a NEW card (check-already-seen said not seen): reads the currently-
- * selected detail pane itself (a direct browser.snapshot() call, never
- * exposed to the navigating agent as a tool) and hands that text to the
- * isolated per-job judge (job-relevance-judge.ts) — a fresh Agent + a single
- * generate() call with no shared history, so the posting's full text, and
- * the judge's own reasoning about it, never enter the navigating agent's
- * conversation and never carry forward to the next job. The navigator only
- * ever sees this tool's small {continue} result.
- */
-function createJudgeAndReportJobTool(ctx: ScanRunContext, browser: AgentBrowser) {
-  return createTool({
-    id: 'judge-and-report-job',
-    description:
-      'For a NEW job card (one check-already-seen did NOT flag as seen) that is currently selected in the detail pane: reads the full posting and judges it against the candidate resume/profile/requirements in an independent call, then records and routes the result. Call this exactly once per new card, right after selecting it — do not read or reason about the posting yourself first. Returns whether to keep scanning (a hard rate-limit/abort check only, never a relevance decision — that\'s check-page-relevance-ratio\'s job).',
-    inputSchema: z.object({ jobId: z.string() }),
-    outputSchema: z.object({ continue: z.boolean() }),
-    execute: async ({ jobId }) => {
-      ctx.scanned++
-      ctx.pageScanned++
-
-      const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
-      const snap = await browser.snapshot({ interactiveOnly: false })
-      const jobText = 'snapshot' in snap && snap.snapshot ? snap.snapshot : ''
-
-      let verdict: Awaited<ReturnType<typeof judgeJob>>
-      try {
-        if (!jobText) throw new Error('Could not read the job detail pane (empty snapshot)')
-        verdict = await judgeJob(jobText, resolveModel(getCurrentConfig(), appState.settings.model, 'judge'))
-      } catch (err) {
-        // A failed/unparseable judgment must not crash the whole run — record
-        // it as skipped (safe default) so it's never silently lost, and never
-        // re-judged as if it were untouched.
-        logger.error({ err, jobId }, 'search: relevance judge failed')
-        verdict = {
-          title: 'Unknown',
-          company: 'Unknown',
-          location: null,
-          applyType: 'external',
-          externalUrl: null,
-          verdict: 'skip',
-          reason: `Relevance judge failed: ${summarizeError(err)}`,
-        }
-      }
-
-      const db = getDb()
-      const status = verdict.verdict === 'skip' ? 'skipped' : verdict.applyType === 'easy' ? 'queued' : 'external_saved'
-      // .returning() tells us whether this insert actually happened (vs.
-      // conflicting with an existing row) — only route on a real insert, so a
-      // job already in the DB (e.g. the model skipped check-already-seen)
-      // never gets queued/notified twice.
-      const inserted = await db
-        .insert(jobs)
-        .values({
-          id: jobId,
-          title: verdict.title,
-          company: verdict.company,
-          location: verdict.location,
-          applyUrl,
-          applyType: verdict.applyType,
-          sourceUrl: ctx.currentSourceUrl,
-          status,
-          relevanceReason: verdict.reason,
-        })
-        .onConflictDoNothing()
-        .returning({ id: jobs.id })
-
-      if (verdict.verdict === 'skip') {
-        ctx.skipped++
-        pushLog(SEARCH_TAB, `Reviewed "${verdict.title}" at ${verdict.company} (id ${jobId}) — not relevant, skipped. Reason: ${verdict.reason}`)
-      } else {
-        ctx.pageRelevant++
-        if (inserted.length > 0) {
-          if (verdict.applyType === 'easy') {
-            ctx.queued++
-            await enqueueApplyJob(jobId)
-            pushLog(SEARCH_TAB, `Found "${verdict.title}" at ${verdict.company} (id ${jobId}) — added to the Easy Apply queue.`)
-          } else {
-            ctx.externalSaved++
-            recordExternalJobFound()
-            pushLog(SEARCH_TAB, `Found "${verdict.title}" at ${verdict.company} (id ${jobId}) — external apply, saved and notified.`)
-          }
-        } else {
-          pushLog(SEARCH_TAB, `Found "${verdict.title}" at ${verdict.company} (id ${jobId}) — already recorded, not routed again.`)
-        }
-
-        // A separate external apply link alongside an Easy Apply job — keyed by
-        // its own URL hash (not the LinkedIn job id) since it's a distinct
-        // record from the Easy Apply queue entry above, the same way
-        // career-scan-agent keys career-page postings.
-        if (verdict.applyType === 'easy' && verdict.externalUrl) {
-          const externalId = applyUrlToJobId(verdict.externalUrl)
-          const externalInserted = await db
-            .insert(jobs)
-            .values({
-              id: externalId,
-              title: verdict.title,
-              company: verdict.company,
-              location: verdict.location,
-              applyUrl: verdict.externalUrl,
-              applyType: 'external',
-              sourceUrl: ctx.currentSourceUrl,
-              status: 'external_saved',
-              relevanceReason: verdict.reason,
-            })
-            .onConflictDoNothing()
-            .returning({ id: jobs.id })
-
-          if (externalInserted.length > 0) {
-            ctx.externalSaved++
-            recordExternalJobFound()
-            pushLog(SEARCH_TAB, `"${verdict.title}" at ${verdict.company} also lists an external apply link — saved that too.`)
-          }
-        }
-      }
-
-      const shouldContinue = computeMidPageContinueDecision({
-        scanned: ctx.scanned,
-        aborted: ctx.signal.aborted,
-      })
-      return { continue: shouldContinue }
-    },
-  })
+/** Whether this page is the last one for its search URL: it came back with
+ * zero cards, it's a duplicate of the previous page (clamped start=), or (the
+ * retry pass in collectPageIds having already run) its count is genuinely
+ * under a full page. Pure so it's testable. */
+export function isLastPage(currentPageIds: string[], previousPageIds: string[]): boolean {
+  if (currentPageIds.length === 0) return true
+  if (isDuplicatePage(currentPageIds, previousPageIds)) return true
+  return currentPageIds.length < FULL_PAGE_SIZE
 }
 
-function createCheckPageRelevanceRatioTool(ctx: ScanRunContext) {
-  return createTool({
-    id: 'check-page-relevance-ratio',
-    description:
-      "Call this once you've finished every card on the current page/batch, before loading more results (infinite scroll) or clicking a \"Next\" pagination control. Returns whether this search URL's result quality is still good enough to keep paginating, based on the fraction of this page's jobs (new + already-seen) that were relevant.",
-    inputSchema: z.object({}),
-    outputSchema: z.object({ continue: z.boolean() }),
-    execute: async () => {
-      const shouldContinue = computeRelevanceContinueDecision({
-        pageScanned: ctx.pageScanned,
-        pageRelevant: ctx.pageRelevant,
-        threshold: RELEVANCE_CONTINUE_THRESHOLD,
-        scanFullList: ctx.currentScanFullList,
-      })
-      if (ctx.currentScanFullList) {
-        pushLog(SEARCH_TAB, 'Full-list mode: continuing regardless of relevance.')
-        ctx.pageScanned = 0
-        ctx.pageRelevant = 0
-        return { continue: true }
-      }
-      const pct = ctx.pageScanned === 0 ? 0 : Math.round((ctx.pageRelevant / ctx.pageScanned) * 100)
-      if (shouldContinue) {
-        pushLog(SEARCH_TAB, `Page relevance: ${ctx.pageRelevant}/${ctx.pageScanned} (${pct}%) — continuing to more results.`)
-        ctx.pageScanned = 0
-        ctx.pageRelevant = 0
-      } else {
-        pushLog(
-          SEARCH_TAB,
-          `Page relevance: ${ctx.pageRelevant}/${ctx.pageScanned} (${pct}%) — below the ${Math.round(RELEVANCE_CONTINUE_THRESHOLD * 100)}% threshold, stopping this search URL.`,
-        )
-      }
-      return { continue: shouldContinue }
-    },
-  })
+/** Detects a LinkedIn checkpoint/CAPTCHA/authwall redirect from the tab's own
+ * URL — deterministic, no LLM judgment needed to recognize it. Best-effort:
+ * this covers the URL patterns LinkedIn is known to redirect to, not every
+ * possible unexpected page state. Pure so it's testable. */
+export function detectCheckpointUrl(url: string): string | null {
+  if (/\/checkpoint\/|\/authwall/i.test(url)) {
+    return `LinkedIn is showing a checkpoint/verification page (${url}). Please resolve it in the browser, then answer here once done.`
+  }
+  return null
 }
 
-function createRequestHumanInputTool() {
-  return createTool({
-    id: 'request-human-input',
-    description:
-      'Ask the human for help when stuck (LinkedIn checkpoint, CAPTCHA, or anything else you cannot resolve yourself). Waits for their typed reply, then returns it as the answer.',
-    inputSchema: z.object({ question: z.string() }),
-    outputSchema: z.object({ answer: z.string() }),
-    execute: async ({ question }) => {
-      pushLog(SEARCH_TAB, `Needs input: ${question}`)
-      const answer = await waitForAnswer(SEARCH_TAB, question)
-      setAgentStatus(SEARCH_TAB, 'running')
-      pushLog(SEARCH_TAB, `Got answer: ${answer}`)
-      return { answer }
+async function readPageIdsOnce(page: Page): Promise<string[]> {
+  return page.evaluate((sel: string) => {
+    const seen = new Set<string>()
+    const ids: string[] = []
+    document.querySelectorAll(sel).forEach((el) => {
+      const id = el.getAttribute('data-occludable-job-id') || el.getAttribute('data-job-id')
+      if (id && !seen.has(id)) {
+        seen.add(id)
+        ids.push(id)
+      }
+    })
+    return ids
+  }, JOB_ID_ATTR_SELECTOR)
+}
+
+async function isScrollContainerAtBottom(page: Page): Promise<boolean> {
+  return page.evaluate((sel: string) => {
+    const cards = document.querySelectorAll(sel)
+    const last = cards[cards.length - 1]
+    if (!last) return true
+    let el: Element | null = last.parentElement
+    while (el && el.scrollHeight <= el.clientHeight) el = el.parentElement
+    if (!el) return true
+    return el.scrollTop + el.clientHeight >= el.scrollHeight - 2
+  }, JOB_ID_ATTR_SELECTOR)
+}
+
+async function scrollToTop(page: Page): Promise<void> {
+  await page.evaluate((sel: string) => {
+    const cards = document.querySelectorAll(sel)
+    const first = cards[0]
+    if (!first) return
+    let el: Element | null = first.parentElement
+    while (el && el.scrollHeight <= el.clientHeight) el = el.parentElement
+    if (el) el.scrollTop = 0
+    else window.scrollTo(0, 0)
+  }, JOB_ID_ATTR_SELECTOR)
+}
+
+/** Scrolls the nearest scrollable ancestor of the last known card by a
+ * fraction (1/divisor) of its own visible height — small and deliberate, not
+ * a blind whole-page jump. A big scroll (or scrolling window instead of the
+ * actual list panel) is exactly what causes cards to render and unmount again
+ * before ever being read, silently skipping them. */
+async function scrollByFraction(page: Page, divisor: number, signal: AbortSignal): Promise<void> {
+  await page.evaluate(
+    ({ sel, divisor }: { sel: string; divisor: number }) => {
+      const cards = document.querySelectorAll(sel)
+      const last = cards[cards.length - 1]
+      if (!last) return
+      let el: Element | null = last.parentElement
+      while (el && el.scrollHeight <= el.clientHeight) el = el.parentElement
+      if (el) el.scrollTop += el.clientHeight / divisor
+      else window.scrollBy(0, window.innerHeight / divisor)
     },
-  })
+    { sel: JOB_ID_ATTR_SELECTOR, divisor },
+  )
+  await sleep(600, signal)
+}
+
+/** Hard circuit breaker on a single scroll-and-collect pass — if the
+ * scroll-container detection ever picks the wrong DOM element (isBottom
+ * never true because scrollTop/scrollHeight are being read off an element
+ * that isn't actually the one scrolling), the while loop below has no other
+ * way to end: no error, no thrown exception, it would just sleep 600ms/step
+ * forever with nothing logged. A page's ~25 cards need well under 20 half-
+ * height steps in practice; 60 is a generous ceiling, not a per-job budget. */
+const MAX_SCROLL_STEPS_PER_PASS = 60
+
+/** One full top-to-bottom walk of the currently loaded page, scrolling by
+ * 1/divisor of the container's height each step, until the container
+ * genuinely bottoms out and stops producing new ids. */
+async function scrollAndCollectOnePass(page: Page, divisor: number, signal: AbortSignal): Promise<string[]> {
+  await scrollToTop(page)
+  await sleep(400, signal)
+
+  let ids: string[] = []
+  let consecutiveNoNew = 0
+  let steps = 0
+  while (!signal.aborted) {
+    const domIds = await readPageIdsOnce(page)
+    const before = ids.length
+    ids = mergeChecklistIds(ids, domIds)
+    const gained = ids.length - before
+    consecutiveNoNew = gained === 0 ? consecutiveNoNew + 1 : 0
+
+    const atBottom = await isScrollContainerAtBottom(page)
+    if (shouldStopScrolling(atBottom, consecutiveNoNew, ids.length)) break
+
+    steps++
+    if (steps >= MAX_SCROLL_STEPS_PER_PASS) {
+      logger.warn(
+        { collected: ids.length, steps, divisor },
+        'search: hit the per-pass scroll-step cap without the container reporting bottom — scroll-container detection may be wrong for this page',
+      )
+      pushLog(SEARCH_TAB, `Gave up scrolling this pass after ${MAX_SCROLL_STEPS_PER_PASS} steps (collected ${ids.length}) — the scroll container may not be what was expected.`)
+      break
+    }
+    await scrollByFraction(page, divisor, signal)
+  }
+  return ids
+}
+
+/** Collects every job id on the currently loaded page. First pass uses
+ * half-height scroll steps (50% viewport overlap between reads — a card
+ * fully visible in one read is still at least partially rendered in the
+ * next). If that undercounts against the expected FULL_PAGE_SIZE without a
+ * genuine end-of-results signal, one retry pass runs with quarter-height
+ * steps as a finer-grained backstop. Bounded to at most 2 passes. */
+async function collectPageIds(page: Page, signal: AbortSignal): Promise<string[]> {
+  const divisors = [2, 4]
+  let ids: string[] = []
+  for (let i = 0; i < divisors.length; i++) {
+    ids = await scrollAndCollectOnePass(page, divisors[i]!, signal)
+    if (signal.aborted) return ids
+    const isFinalAttempt = i === divisors.length - 1
+    if (isFinalAttempt || !shouldRetryPageCollection(ids.length, ids.length === 0)) return ids
+    pushLog(SEARCH_TAB, `Page returned only ${ids.length}/${FULL_PAGE_SIZE} job(s) — retrying with finer scroll steps.`)
+    logger.warn({ collected: ids.length }, 'search: page undercounted, retrying with finer scroll steps')
+  }
+  return ids
+}
+
+/** Batch dedupe check — a single `id IN (...)` query per page instead of one
+ * query per id, now that nothing needs a per-id tool round-trip. */
+async function filterUnseenJobIds(ids: string[]): Promise<string[]> {
+  if (ids.length === 0) return []
+  const db = getDb()
+  const rows = await db.select({ id: jobs.id }).from(jobs).where(inArray(jobs.id, ids))
+  const known = new Set(rows.map((r) => r.id))
+  return ids.filter((id) => !known.has(id))
+}
+
+/** Walks every page of one search URL: goto (page 0 is already loaded by
+ * openOwnTab, later pages via the &start=N URL param), collect that page's
+ * ids, queue the new ones for judgment, decide whether another page follows.
+ * No LLM in this path at all — deterministic code only, so there is nothing
+ * here that can "stop early" the way an agent.generate() call could. */
+async function scanOneUrl(entry: ScanUrlEntry, ctx: ScanRunContext, browser: AgentBrowser, cdpUrl: string, ownTab: OwnedTab): Promise<'ok' | 'aborted'> {
+  let pageIndex = 0
+  let previousPageIds: string[] = []
+
+  while (pageIndex < MAX_PAGES_PER_URL) {
+    if (ctx.signal.aborted) return 'aborted'
+
+    await reclaimOwnTab(browser, cdpUrl, ownTab)
+    const manager = await browser.getManagerForThread()
+    const page = manager.getPage()
+
+    if (pageIndex > 0) {
+      pushLog(SEARCH_TAB, `Loading page ${pageIndex + 1}...`)
+      const sep = entry.url.includes('?') ? '&' : '?'
+      await page.goto(`${entry.url}${sep}start=${pageIndex * FULL_PAGE_SIZE}`, { waitUntil: 'load' })
+    }
+    // Let the virtualized list start rendering before reading anything.
+    await sleep(1200, ctx.signal)
+    if (ctx.signal.aborted) return 'aborted'
+
+    const checkpointQuestion = detectCheckpointUrl(page.url())
+    if (checkpointQuestion) {
+      pushLog(SEARCH_TAB, `Needs input: ${checkpointQuestion}`)
+      const answer = await waitForAnswer(SEARCH_TAB, checkpointQuestion)
+      setAgentStatus(SEARCH_TAB, 'running', 'scanning...')
+      pushLog(SEARCH_TAB, `Got answer: ${answer} — retrying this page.`)
+      continue // retry the same pageIndex from scratch
+    }
+
+    const pageIds = await collectPageIds(page, ctx.signal)
+    pushLog(SEARCH_TAB, `Page ${pageIndex + 1}: found ${pageIds.length} job(s).`)
+
+    if (pageIds.length > 0) {
+      ctx.totalIdsSeen += pageIds.length
+      const newIds = await filterUnseenJobIds(pageIds)
+      ctx.alreadySeen += pageIds.length - newIds.length
+      for (const id of newIds) {
+        await enqueueJudgeJob(id, entry.url)
+        ctx.queuedForJudge++
+      }
+      if (newIds.length > 0) {
+        pushLog(SEARCH_TAB, `Queued ${newIds.length} new job(s) for judgment (${pageIds.length - newIds.length} already seen).`)
+      }
+    }
+
+    const done = isLastPage(pageIds, previousPageIds)
+    previousPageIds = pageIds
+    if (done) return 'ok'
+    if (ctx.signal.aborted) return 'aborted'
+
+    // Polite pause between page loads so back-to-back pagination doesn't look
+    // like a burst to LinkedIn.
+    await sleep(randomNavDelayMs(), ctx.signal)
+    pageIndex++
+  }
+
+  logger.warn({ url: entry.url, pages: MAX_PAGES_PER_URL }, 'search: hit max-pages safety cap for this URL')
+  pushLog(SEARCH_TAB, `Hit the ${MAX_PAGES_PER_URL}-page safety cap for this URL — stopping here.`)
+  return 'ok'
 }
 
 export interface SearchRunResult {
-  scanned: number
-  queued: number
-  externalSaved: number
+  queuedForJudge: number
   urlsTried: string[]
 }
 
@@ -442,7 +402,7 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
   if (isSearchRunning()) throw new Error('A search is already running')
   if (entries.length === 0) {
     pushLog(SEARCH_TAB, 'No search URLs to run.')
-    return { scanned: 0, queued: 0, externalSaved: 0, urlsTried: [] }
+    return { queuedForJudge: 0, urlsTried: [] }
   }
 
   const abort = new AbortController()
@@ -452,97 +412,59 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
   const runId = randomUUID()
   await db.insert(searchRuns).values({ id: runId, urlsTried: [] })
 
-  const ctx: ScanRunContext = {
-    signal: abort.signal,
-    scanned: 0,
-    queued: 0,
-    externalSaved: 0,
-    skipped: 0,
-    pageScanned: 0,
-    pageRelevant: 0,
-    ownTab: null,
-    currentSourceUrl: '',
-    currentScanFullList: false,
-  }
+  const ctx: ScanRunContext = { signal: abort.signal, totalIdsSeen: 0, alreadySeen: 0, queuedForJudge: 0 }
+  const cdpUrl = getSharedCdpUrl()
 
   try {
-    const instructions = buildScanInstructions()
     const browser = getSearchBrowser()
-    const agent = new Agent({
-      id: 'search-agent',
-      name: 'Search Agent',
-      instructions,
-      model: resolveModel(getCurrentConfig(), appState.settings.model, 'search'),
-      browser,
-      inputProcessors: [noOpBrowserContextProcessor],
-      tools: {
-        checkAlreadySeen: createCheckAlreadySeenTool(ctx),
-        judgeAndReportJob: createJudgeAndReportJobTool(ctx, browser),
-        checkPageRelevanceRatio: createCheckPageRelevanceRatioTool(ctx),
-        requestHumanInput: createRequestHumanInputTool(),
-      },
-    })
-    // Agent defaults to Mastra's ConsoleLogger, which writes raw (ANSI-colored)
-    // errors straight to stdout — corrupts the opentui TUI frame on any tool
-    // error (e.g. a Playwright navigation timeout). Silence it; failures are
-    // already surfaced via pushLog/logger.error at the call sites below.
-    agent.__setLogger(noopLogger)
-
     const triedUrls: string[] = []
+
     for (const entry of entries) {
       if (abort.signal.aborted) break
 
-      const url = entry.url
-
-      // Page-relevance counters are per search URL — a fresh URL starts with a
-      // clean slate regardless of how the previous one ended.
-      ctx.pageScanned = 0
-      ctx.pageRelevant = 0
-      ctx.currentSourceUrl = url
-      ctx.currentScanFullList = entry.scanFullList
-      // '/jobs/search' distinguishes this URL's results tab from the login
-      // tabs (feed/inbox) and from any easy-apply tab (always '/jobs/view/').
-      ctx.ownTab = { matchFragment: '/jobs/search' }
-
       setAgentStatus(SEARCH_TAB, 'running', 'scanning...')
-      pushLog(SEARCH_TAB, `Scanning ${url}`)
-      triedUrls.push(url)
+      pushLog(SEARCH_TAB, `Scanning ${entry.url}`)
+      triedUrls.push(entry.url)
 
+      // '/jobs/search' distinguishes this URL's results tab from the login
+      // tabs (feed/inbox) and from any easy-apply/judge tab (always
+      // '/jobs/view/'). Opened fresh per URL, same as before.
+      let ownTab: OwnedTab
       try {
-        await agent.generate(`Search results URL to scan: ${url}`, {
-          abortSignal: abort.signal,
-          onStepFinish: (event) => logSearchStep(event, abort.signal, ctx, browser),
-          // Mastra's Agent.generate defaults maxSteps to 5 tool-call steps total —
-          // nowhere near enough to click through a page of job cards (each card is
-          // a few steps: snapshot, check-already-seen, judge-and-report-job, click
-          // next — judge-and-report-job's own isolated judge call does NOT count
-          // against this budget, since it's a separate agent.generate() entirely).
-          // There's no cap on jobs scanned per URL (check-page-relevance-ratio and
-          // running out of results/pages are what actually end a URL's scan), so
-          // this is sized as a generous, fixed backstop against a genuinely stuck
-          // agent — not a per-job budget.
-          maxSteps: 4000,
-        })
+        ownTab = await openOwnTab(browser, cdpUrl, entry.url, '/jobs/search')
       } catch (err) {
-        if (abort.signal.aborted) {
-          pushLog(SEARCH_TAB, 'Search aborted mid-step.')
-          break
-        }
-        throw err
+        pushLog(SEARCH_TAB, `Could not open ${entry.url}: ${summarizeError(err)} — skipping.`)
+        logger.error({ err, url: entry.url }, 'search: failed to open tab')
+        continue
+      }
+
+      let outcome: 'ok' | 'aborted' = 'ok'
+      try {
+        outcome = await scanOneUrl(entry, ctx, browser, cdpUrl, ownTab)
+      } catch (err) {
+        pushLog(SEARCH_TAB, `Error scanning ${entry.url}: ${summarizeError(err)} — moving to next URL.`)
+        logger.error({ err, url: entry.url }, 'search: scan failed')
+      } finally {
+        await closeOwnTab(browser, ownTab)
       }
 
       await db
         .update(searchRuns)
         .set({
           urlsTried: triedUrls,
-          scannedCount: ctx.scanned,
-          relevantCount: ctx.queued + ctx.externalSaved,
-          skippedCount: ctx.skipped,
+          scannedCount: ctx.totalIdsSeen,
+          relevantCount: ctx.queuedForJudge,
+          skippedCount: ctx.alreadySeen,
         })
         .where(eq(searchRuns.id, runId))
 
-      // Polite pause between search URLs so back-to-back page loads don't look
-      // like a burst to LinkedIn.
+      if (outcome === 'aborted') {
+        pushLog(SEARCH_TAB, 'Search aborted mid-step.')
+        break
+      }
+
+      // Polite pause between search URLs so back-to-back page loads don't
+      // look like a burst to LinkedIn.
       await sleep(randomNavDelayMs(), abort.signal)
     }
 
@@ -550,17 +472,17 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
 
     const stopped = abort.signal.aborted ? ' (stopped early)' : ''
     const summary =
-      ctx.scanned === 0
-        ? `Finished searching ${triedUrls.length} page(s)${stopped}. No new jobs found.`
-        : `Finished searching ${triedUrls.length} page(s)${stopped}. Found ${ctx.scanned} new job(s): ${ctx.queued} queued for Easy Apply, ${ctx.externalSaved} saved as external.`
+      ctx.queuedForJudge === 0
+        ? `Finished searching ${triedUrls.length} URL(s)${stopped}. No new jobs queued for judgment.`
+        : `Finished searching ${triedUrls.length} URL(s)${stopped}. Queued ${ctx.queuedForJudge} new job(s) for judgment (${ctx.alreadySeen} already seen).`
     pushLog(SEARCH_TAB, summary)
     logger.info(
-      { scanned: ctx.scanned, queued: ctx.queued, externalSaved: ctx.externalSaved, urls: triedUrls.length },
+      { totalIdsSeen: ctx.totalIdsSeen, queuedForJudge: ctx.queuedForJudge, alreadySeen: ctx.alreadySeen, urls: triedUrls.length },
       'search: run finished',
     )
     setAgentStatus(SEARCH_TAB, 'idle', null)
 
-    return { scanned: ctx.scanned, queued: ctx.queued, externalSaved: ctx.externalSaved, urlsTried: triedUrls }
+    return { queuedForJudge: ctx.queuedForJudge, urlsTried: triedUrls }
   } finally {
     activeAbort = null
     // Always drop back to idle — without this, a thrown error (surfaced to the

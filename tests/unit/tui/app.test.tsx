@@ -50,7 +50,7 @@ describe('App', () => {
     expect(setup.captureCharFrame()).toContain('Type / for commands')
   })
 
-  test('pressing Tab cycles activeTab search -> easy -> external -> careers -> search', async () => {
+  test('pressing Tab cycles activeTab search -> easy -> judge -> careers -> search', async () => {
     const setup = await testRender(() => <App />, { width: 100, height: 30 })
     await setup.renderOnce()
     expect(appState.activeTab).toBe('search')
@@ -61,7 +61,7 @@ describe('App', () => {
 
     setup.mockInput.pressTab()
     await setup.renderOnce()
-    expect(appState.activeTab).toBe('external')
+    expect(appState.activeTab).toBe('judge')
 
     setup.mockInput.pressTab()
     await setup.renderOnce()

@@ -22,6 +22,12 @@ export interface StatusFilterConfig {
   defaultValue?: string
 }
 
+export interface DateFilterConfig {
+  columnId: string
+  /** Shown in the date inputs' aria-label, e.g. "Applied" — defaults to "Date". */
+  label?: string
+}
+
 /** One button in the bulk-actions toolbar that appears once at least one row
  * is selected. `onClick` receives the selected rows and a `clearSelection`
  * callback — the caller decides when to clear (typically its mutation's
@@ -38,6 +44,7 @@ export interface DataTableProps<TData> {
   columns: ColumnDef<TData, any>[]
   data: TData[]
   statusFilter?: StatusFilterConfig
+  dateFilter?: DateFilterConfig
   /** Stable per-row id (e.g. `(row) => row.jobId`) — required for selection
    * to survive sorting/filtering and to report the right ids to bulk actions. */
   getRowId?: (row: TData) => string
@@ -50,10 +57,12 @@ export interface DataTableProps<TData> {
 
 const ALL_STATUSES = '__all__'
 
-export function DataTable<TData>({ columns, data, statusFilter, getRowId, bulkActions, searchColumns }: DataTableProps<TData>) {
+export function DataTable<TData>({ columns, data, statusFilter, dateFilter, getRowId, bulkActions, searchColumns }: DataTableProps<TData>) {
   const [sorting, setSorting] = React.useState<SortingState>([])
   const [globalFilter, setGlobalFilter] = React.useState('')
   const [statusValue, setStatusValue] = React.useState(statusFilter?.defaultValue ?? ALL_STATUSES)
+  const [dateFrom, setDateFrom] = React.useState('')
+  const [dateTo, setDateTo] = React.useState('')
   const [rowSelection, setRowSelection] = React.useState<RowSelectionState>({})
 
   const scopedFilterFn = React.useMemo<FilterFn<TData> | undefined>(() => {
@@ -66,9 +75,25 @@ export function DataTable<TData>({ columns, data, statusFilter, getRowId, bulkAc
   }, [searchColumns])
 
   const filteredData = React.useMemo(() => {
-    if (!statusFilter || statusValue === ALL_STATUSES) return data
-    return data.filter((row) => String((row as Record<string, unknown>)[statusFilter.columnId]) === statusValue)
-  }, [data, statusFilter, statusValue])
+    let rows = data
+    if (statusFilter && statusValue !== ALL_STATUSES) {
+      rows = rows.filter((row) => String((row as Record<string, unknown>)[statusFilter.columnId]) === statusValue)
+    }
+    if (dateFilter && (dateFrom || dateTo)) {
+      const fromTime = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : undefined
+      const toTime = dateTo ? new Date(`${dateTo}T23:59:59.999`).getTime() : undefined
+      rows = rows.filter((row) => {
+        const raw = (row as Record<string, unknown>)[dateFilter.columnId]
+        if (!raw) return false
+        const time = new Date(String(raw)).getTime()
+        if (Number.isNaN(time)) return false
+        if (fromTime !== undefined && time < fromTime) return false
+        if (toTime !== undefined && time > toTime) return false
+        return true
+      })
+    }
+    return rows
+  }, [data, statusFilter, statusValue, dateFilter, dateFrom, dateTo])
 
   const tableColumns = React.useMemo<ColumnDef<TData, any>[]>(() => {
     if (!bulkActions || bulkActions.length === 0) return columns
@@ -124,6 +149,37 @@ export function DataTable<TData>({ columns, data, statusFilter, getRowId, bulkAc
               ))}
             </SelectContent>
           </Select>
+        )}
+        {dateFilter && (
+          <div className="flex items-center gap-1">
+            <Input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="w-36"
+              aria-label={`${dateFilter.label ?? 'Date'} from`}
+            />
+            <span className="text-sm text-muted-foreground">to</span>
+            <Input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="w-36"
+              aria-label={`${dateFilter.label ?? 'Date'} to`}
+            />
+            {(dateFrom || dateTo) && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setDateFrom('')
+                  setDateTo('')
+                }}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
         )}
         <Input
           placeholder={searchColumns ? `Search ${searchColumns.join(', ')}...` : 'Search...'}

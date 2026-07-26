@@ -15,6 +15,14 @@ const judgeVerdictSchema = z.object({
 
 export type JobJudgeVerdict = z.infer<typeof judgeVerdictSchema>
 
+/** No timeout/AbortSignal was wired into this call at all — a slow/hung
+ * provider response left the whole search agent silently stuck (the tool
+ * awaiting this promise never resolves, so no error, no log, no progress)
+ * with nothing to distinguish it from a legitimately long-running scan.
+ * Bounded generously (single job posting, single turn) so a real response
+ * is never cut off. */
+const JUDGE_TIMEOUT_MS = 120_000
+
 function stripCodeFence(text: string): string {
   const trimmed = text.trim()
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/)
@@ -35,7 +43,7 @@ export function parseJudgeResponse(text: string): JobJudgeVerdict {
  * conversation with the navigating search agent that calls this. Nothing
  * about this job (or any prior one) carries forward to the next call.
  */
-export async function judgeJob(jobPageText: string, model: string): Promise<JobJudgeVerdict> {
+export async function judgeJob(jobPageText: string, model: string, signal?: AbortSignal): Promise<JobJudgeVerdict> {
   const instructions = await buildJudgeInstructions()
   const agent = new Agent({
     id: 'job-relevance-judge',
@@ -45,6 +53,9 @@ export async function judgeJob(jobPageText: string, model: string): Promise<JobJ
   })
   agent.__setLogger(noopLogger)
 
-  const result = await agent.generate(`Job posting page text:\n${jobPageText}`)
+  const timeoutSignal = AbortSignal.timeout(JUDGE_TIMEOUT_MS)
+  const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+
+  const result = await agent.generate(`Job posting page text:\n${jobPageText}`, { abortSignal })
   return parseJudgeResponse(result.text)
 }

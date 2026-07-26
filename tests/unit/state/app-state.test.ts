@@ -49,9 +49,9 @@ describe('app-state', () => {
   })
 
   test('setNeedsInput sets and clears the pending question', () => {
-    setNeedsInput('external', 'What is your visa status?')
-    expect(appState.tabs.external.needsInputQuestion).toBe('What is your visa status?')
-    setNeedsInput('external', null)
-    expect(appState.tabs.external.needsInputQuestion).toBeNull()
+    setNeedsInput('judge', 'What is your visa status?')
+    expect(appState.tabs.judge.needsInputQuestion).toBe('What is your visa status?')
+    setNeedsInput('judge', null)
+    expect(appState.tabs.judge.needsInputQuestion).toBeNull()
   })
 })

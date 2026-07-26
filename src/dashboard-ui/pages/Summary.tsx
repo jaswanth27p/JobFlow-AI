@@ -10,10 +10,8 @@ export function SummaryPage() {
   if (!data) return null
 
   const stats = [
-    { label: 'Scanned today', value: data.scanned },
-    { label: 'Relevant found', value: data.found },
-    { label: 'Search runs', value: data.runCount },
-    { label: 'Applied today', value: data.applied },
+    { label: 'Easy applied today', value: data.applied },
+    { label: 'Externals saved today', value: data.externalSaved },
     { label: 'Failed today', value: data.failed },
     { label: 'Queue waiting', value: data.queueWaiting },
     { label: 'Queue active', value: data.queueActive },

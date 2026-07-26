@@ -18,7 +18,7 @@ export interface BuiltNotification {
 const TAB_LABELS: Record<TabId, string> = {
   search: 'Search',
   easy: 'Easy Apply',
-  external: 'External',
+  judge: 'Judge Queue',
   careers: 'Career Pages',
 }
 

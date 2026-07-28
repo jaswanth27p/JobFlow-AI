@@ -8,7 +8,7 @@ function emptyTabState() {
 
 function initialState(settings: Settings): AppState {
   return {
-    session: { linkedin: false, gmail: false },
+    session: { linkedin: false, gmail: false, dashboard: false },
     activeTab: 'search',
     tabs: {
       search: emptyTabState(),
@@ -28,7 +28,7 @@ export function initAppState(settings: Settings): void {
   ;[appState, setAppStateInternal] = createStore<AppState>(initialState(settings))
 }
 
-export function setSessionStatus(service: 'linkedin' | 'gmail', connected: boolean): void {
+export function setSessionStatus(service: 'linkedin' | 'gmail' | 'dashboard', connected: boolean): void {
   setAppStateInternal('session', service, connected)
 }
 

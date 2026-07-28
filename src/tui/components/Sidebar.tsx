@@ -49,6 +49,9 @@ export function Sidebar() {
       <text fg={appState.session.gmail ? theme().accent : theme().textMuted}>
         ● Gmail: {appState.session.gmail ? 'connected' : 'waiting'}
       </text>
+      <text fg={appState.session.dashboard ? theme().success : theme().textMuted}>
+        ● Dashboard: {appState.session.dashboard ? 'running' : 'stopped'}
+      </text>
 
       <text fg={theme().text}> </text>
       <text fg={theme().success} attributes={TextAttributes.BOLD}>Agents</text>

@@ -4,6 +4,7 @@ import { appState, setSessionStatus, setActiveTab, setSetting, pushLog, TAB_IDS 
 import type { TabId, Settings } from '../state/types.ts'
 import { getBrowserServerPort } from '../browser/session.ts'
 import { verifyLogin } from '../browser/verify-login.ts'
+import { startDashboard, stopDashboard, isDashboardRunning, getDashboardUrl } from '../dashboard/server.ts'
 import { openTabPicker } from '../tui/components/TabPicker.tsx'
 import { openThemePicker } from '../tui/components/ThemePicker.tsx'
 import { openOptionPicker } from '../tui/components/OptionPicker.tsx'
@@ -171,6 +172,37 @@ export function registerGlobalCommands(): void {
           ? 'Login verified: Gmail connected.'
           : 'Not logged in yet (Gmail). Optional and currently unused by any agent — logging in is not required.',
       )
+    },
+  })
+
+  registerCommand({
+    name: 'start-dashboard',
+    scope: 'global',
+    description: 'Start the local web dashboard (no-op if already running)',
+    run: () => {
+      if (isDashboardRunning()) {
+        pushLog(appState.activeTab, `Dashboard already running at ${getDashboardUrl()}.`)
+        return
+      }
+      startDashboard()
+      pushLog(
+        appState.activeTab,
+        isDashboardRunning() ? `Dashboard started at ${getDashboardUrl()}.` : 'Dashboard failed to start — port in use? Check logs.',
+      )
+    },
+  })
+
+  registerCommand({
+    name: 'stop-dashboard',
+    scope: 'global',
+    description: 'Stop the local web dashboard',
+    run: () => {
+      if (!isDashboardRunning()) {
+        pushLog(appState.activeTab, 'Dashboard is not running.')
+        return
+      }
+      stopDashboard()
+      pushLog(appState.activeTab, 'Dashboard stopped.')
     },
   })
 

@@ -114,7 +114,7 @@ async function main() {
     process.exit(1)
   }
 
-  startDashboard()
+  if (!process.argv.includes('--no-dashboard')) startDashboard()
   startSummaryScheduler(config.notifySummaryIntervalMinutes * 60_000)
 
   initAppState({

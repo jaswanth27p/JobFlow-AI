@@ -9,7 +9,7 @@ import { retryWithAnswer, retryJob } from '../queues/retry.ts'
 import { groupAnswersByQuestion, type ApplicationAnswers } from './review-data.ts'
 import { logger } from '../utils/logger.ts'
 import { filterUnreviewed, clusterQuestions } from './review-cluster.ts'
-import { appState } from '../state/app-state.ts'
+import { appState, setSessionStatus } from '../state/app-state.ts'
 import type {
   SummaryDto,
   ApplicationDto,
@@ -377,22 +377,32 @@ export async function handleRequest(req: Request): Promise<Response> {
 }
 
 let server: ReturnType<typeof Bun.serve> | null = null
+const DASHBOARD_PORT = Number(process.env.DASHBOARD_PORT) || 4870
+
+export function isDashboardRunning(): boolean {
+  return server !== null
+}
+
+export function getDashboardUrl(): string | null {
+  return server ? `http://127.0.0.1:${DASHBOARD_PORT}` : null
+}
 
 export function startDashboard(): void {
   if (server) return
-  const port = Number(process.env.DASHBOARD_PORT) || 4870
   try {
     // Bind loopback only — this serves the user's application history and
     // personal answers; it must never be reachable from the LAN.
-    server = Bun.serve({ port, hostname: '127.0.0.1', fetch: handleRequest })
-    logger.info({ port }, 'dashboard: listening')
+    server = Bun.serve({ port: DASHBOARD_PORT, hostname: '127.0.0.1', fetch: handleRequest })
+    setSessionStatus('dashboard', true)
+    logger.info({ port: DASHBOARD_PORT }, 'dashboard: listening')
   } catch (err) {
     // A busy port must not take the whole app down — the dashboard is optional.
-    logger.error({ err, port }, 'dashboard: failed to start (port in use?) — continuing without it')
+    logger.error({ err, port: DASHBOARD_PORT }, 'dashboard: failed to start (port in use?) — continuing without it')
   }
 }
 
 export function stopDashboard(): void {
   server?.stop(true)
   server = null
+  setSessionStatus('dashboard', false)
 }

@@ -4,7 +4,7 @@ import { noopLogger } from '@mastra/core/logger'
 import { AgentBrowser } from '@mastra/agent-browser'
 import type { Page } from 'playwright-core'
 import { getSharedCdpUrl } from '../browser/session.ts'
-import { openOwnTab, closeOwnTab, reclaimOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
+import { openOwnTab, navigateOwnTab, reclaimOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, searchRuns } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -65,6 +65,27 @@ function getSearchBrowser(): AgentBrowser {
     sharedBrowser.__setLogger(noopLogger)
   }
   return sharedBrowser
+}
+
+/** The one tab the scan loop ever has open — reused across every configured
+ * URL (navigate in place) instead of opening a new one and closing it per
+ * URL. See navigateOwnTab's doc comment (tab-guard.ts) for why: closeOwnTab
+ * is best-effort and a missed close used to leave a stray tab behind forever,
+ * one per URL scanned. */
+let searchTab: OwnedTab | null = null
+
+async function ensureSearchTab(browser: AgentBrowser, cdpUrl: string, url: string, matchFragment: string): Promise<OwnedTab> {
+  if (searchTab) {
+    try {
+      searchTab = await navigateOwnTab(browser, cdpUrl, searchTab, url, matchFragment)
+      return searchTab
+    } catch (err) {
+      logger.warn({ err }, 'search: could not reuse existing tab, opening a fresh one')
+      searchTab = null
+    }
+  }
+  searchTab = await openOwnTab(browser, cdpUrl, url, matchFragment)
+  return searchTab
 }
 
 let activeAbort: AbortController | null = null
@@ -428,10 +449,11 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
 
       // '/jobs/search' distinguishes this URL's results tab from the login
       // tabs (feed/inbox) and from any easy-apply/judge tab (always
-      // '/jobs/view/'). Opened fresh per URL, same as before.
+      // '/jobs/view/'). Reused across every URL in this run (and across
+      // runs) — navigated in place, never closed between URLs.
       let ownTab: OwnedTab
       try {
-        ownTab = await openOwnTab(browser, cdpUrl, entry.url, '/jobs/search')
+        ownTab = await ensureSearchTab(browser, cdpUrl, entry.url, '/jobs/search')
       } catch (err) {
         pushLog(SEARCH_TAB, `Could not open ${entry.url}: ${summarizeError(err)} — skipping.`)
         logger.error({ err, url: entry.url }, 'search: failed to open tab')
@@ -444,8 +466,6 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
       } catch (err) {
         pushLog(SEARCH_TAB, `Error scanning ${entry.url}: ${summarizeError(err)} — moving to next URL.`)
         logger.error({ err, url: entry.url }, 'search: scan failed')
-      } finally {
-        await closeOwnTab(browser, ownTab)
       }
 
       await db

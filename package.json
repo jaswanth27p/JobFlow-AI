@@ -7,8 +7,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p src/dashboard-ui/tsconfig.json",
     "test": "bun test",
     "dashboard:build": "bun scripts/build-dashboard.ts",
-    "dev": "bun run dashboard:build && bun --env-file=.env run src/index.ts",
-    "start": "bun run dashboard:build && bun --env-file=.env run src/index.ts",
+    "dev": "bun --env-file=.env run src/index.ts",
+    "start": "bun --env-file=.env run src/index.ts",
     "db:push": "drizzle-kit push",
     "clear-data": "bun --env-file=.env run scripts/clear-data.ts"
   },

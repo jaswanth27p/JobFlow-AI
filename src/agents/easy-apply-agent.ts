@@ -8,7 +8,7 @@ import { noopLogger } from '@mastra/core/logger'
 import { createTool } from '@mastra/core/tools'
 import { AgentBrowser } from '@mastra/agent-browser'
 import { getEasyApplyCdpUrl } from '../browser/easy-apply-session.ts'
-import { openOwnTab, reclaimOwnTab, closeOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
+import { openOwnTab, reclaimOwnTab, navigateOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
 import { getCurrentConfig } from '../config/current.ts'
 import { resolveModel } from '../config/resolve-model.ts'
 import { getDb } from '../db/index.ts'
@@ -19,6 +19,7 @@ import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
 import { waitForAnswer } from '../state/prompt-channel.ts'
 import { recordEasyApplyResult } from '../notify/summary-aggregator.ts'
 import { summarizeError } from '../utils/error-summary.ts'
+import { logger } from '../utils/logger.ts'
 import { noOpBrowserContextProcessor } from './no-op-browser-context-processor.ts'
 import { buildApplyInstructions } from '../prompts/easy-apply-agent.prompt.ts'
 import type { AppConfig } from '../config/schema.ts'
@@ -57,6 +58,27 @@ async function getEasyApplyBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: s
     sharedBrowserCdpUrl = cdpUrl
   }
   return { browser: sharedBrowser, cdpUrl: sharedBrowserCdpUrl }
+}
+
+/** The one tab this agent ever has open — reused across every job (navigate
+ * in place) instead of opening a new one and closing it per job. See
+ * navigateOwnTab's doc comment (tab-guard.ts) for why: closeOwnTab is
+ * best-effort and a missed close used to leave a stray tab behind forever,
+ * one per job. */
+let easyApplyTab: OwnedTab | null = null
+
+async function ensureEasyApplyTab(browser: AgentBrowser, cdpUrl: string, url: string, matchFragment: string): Promise<OwnedTab> {
+  if (easyApplyTab) {
+    try {
+      easyApplyTab = await navigateOwnTab(browser, cdpUrl, easyApplyTab, url, matchFragment)
+      return easyApplyTab
+    } catch (err) {
+      logger.warn({ err }, 'easy-apply: could not reuse existing tab, opening a fresh one')
+      easyApplyTab = null
+    }
+  }
+  easyApplyTab = await openOwnTab(browser, cdpUrl, url, matchFragment)
+  return easyApplyTab
 }
 
 export interface JobRecord {
@@ -264,23 +286,20 @@ export async function processEasyApplyJob(jobId: string): Promise<void> {
   const jobRecord: JobRecord = { id: job.id, title: job.title, company: job.company, applyUrl: job.applyUrl }
   const { browser, cdpUrl } = await getEasyApplyBrowser()
 
-  // Opened by code, not the LLM (see tab-guard.ts) — this is the one tab this
-  // job's agent is allowed to act on, reused across every retry attempt below,
-  // and closed once at the very end regardless of outcome.
+  // Opened/reused by code, not the LLM (see tab-guard.ts) — this is the one
+  // tab this agent ever acts on, reused across every retry attempt below AND
+  // across every job this worker ever processes (navigated in place, never
+  // closed between jobs).
   let ownTab: OwnedTab
   try {
-    ownTab = await openOwnTab(browser, cdpUrl, jobRecord.applyUrl, `/jobs/view/${jobRecord.id}`)
+    ownTab = await ensureEasyApplyTab(browser, cdpUrl, jobRecord.applyUrl, `/jobs/view/${jobRecord.id}`)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     await writeFailedApplication(jobRecord, `Failed to open apply tab: ${message}`, 'blocked', null, [])
     return
   }
 
-  try {
-    await processEasyApplyJobInTab(job, jobRecord, config, browser, cdpUrl, ownTab)
-  } finally {
-    await closeOwnTab(browser, ownTab)
-  }
+  await processEasyApplyJobInTab(job, jobRecord, config, browser, cdpUrl, ownTab)
 }
 
 async function processEasyApplyJobInTab(

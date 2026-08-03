@@ -178,16 +178,16 @@ export function registerGlobalCommands(): void {
   registerCommand({
     name: 'start-dashboard',
     scope: 'global',
-    description: 'Start the local web dashboard (no-op if already running)',
-    run: () => {
+    description: 'Start the local web dashboard (builds its UI bundle first; no-op if already running)',
+    run: async () => {
       if (isDashboardRunning()) {
         pushLog(appState.activeTab, `Dashboard already running at ${getDashboardUrl()}.`)
         return
       }
-      startDashboard()
+      await startDashboard()
       pushLog(
         appState.activeTab,
-        isDashboardRunning() ? `Dashboard started at ${getDashboardUrl()}.` : 'Dashboard failed to start — port in use? Check logs.',
+        isDashboardRunning() ? `Dashboard started at ${getDashboardUrl()}.` : 'Dashboard failed to start — build error or port in use? Check logs.',
       )
     },
   })

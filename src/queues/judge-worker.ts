@@ -6,7 +6,7 @@ import { getRedisConnectionOptions } from './connection.ts'
 import { getJudgeQueueCounts } from './judge-queues.ts'
 import { enqueueApplyJob } from './apply-queues.ts'
 import { getJudgeCdpUrl } from '../browser/judge-session.ts'
-import { openOwnTab, closeOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
+import { openOwnTab, navigateOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
 import { getDb } from '../db/index.ts'
 import { jobs } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -66,6 +66,26 @@ async function getJudgeBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: strin
     sharedBrowserCdpUrl = cdpUrl
   }
   return { browser: sharedBrowser, cdpUrl: sharedBrowserCdpUrl }
+}
+
+/** The one tab this worker ever has open — reused across every job (navigate
+ * in place) instead of opening a new one and closing it per job. See
+ * navigateOwnTab's doc comment for why: closeOwnTab is best-effort and a
+ * missed close used to leave a stray tab behind forever, one per job. */
+let judgeTab: OwnedTab | null = null
+
+async function ensureJudgeTab(browser: AgentBrowser, cdpUrl: string, url: string, matchFragment: string): Promise<OwnedTab> {
+  if (judgeTab) {
+    try {
+      judgeTab = await navigateOwnTab(browser, cdpUrl, judgeTab, url, matchFragment)
+      return judgeTab
+    } catch (err) {
+      logger.warn({ err }, 'judge: could not reuse existing tab, opening a fresh one')
+      judgeTab = null
+    }
+  }
+  judgeTab = await openOwnTab(browser, cdpUrl, url, matchFragment)
+  return judgeTab
 }
 
 /** Persists a judge verdict and routes it — the DB-insert half of what used
@@ -207,21 +227,16 @@ export async function processJudgeJob(jobId: string, sourceUrl: string, signal?:
   const { browser, cdpUrl } = await getJudgeBrowser()
   const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
 
-  let ownTab: OwnedTab
   try {
-    ownTab = await openOwnTab(browser, cdpUrl, applyUrl, `/jobs/view/${jobId}`)
+    await ensureJudgeTab(browser, cdpUrl, applyUrl, `/jobs/view/${jobId}`)
   } catch (err) {
     logger.error({ err, jobId }, 'judge: failed to open job tab')
     pushLog(JUDGE_TAB, `Could not open job ${jobId} — will retry on a future scan. (${summarizeError(err)})`)
     return
   }
 
-  try {
-    const verdict = await readJobTextAndJudge(jobId, browser, signal)
-    if (verdict) await recordJudgeVerdict(jobId, sourceUrl, applyUrl, verdict)
-  } finally {
-    await closeOwnTab(browser, ownTab)
-  }
+  const verdict = await readJobTextAndJudge(jobId, browser, signal)
+  if (verdict) await recordJudgeVerdict(jobId, sourceUrl, applyUrl, verdict)
 }
 
 let worker: Worker | null = null

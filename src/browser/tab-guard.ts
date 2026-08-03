@@ -83,3 +83,33 @@ export async function closeOwnTab(browser: AgentBrowser, tab: OwnedTab): Promise
     // Best-effort cleanup — the job's DB outcome is already written regardless.
   }
 }
+
+/** Reuses an already-open owned tab for the next job/URL instead of closing
+ * it and opening a new one. Judge/easy-apply/search each used to open a fresh
+ * tab per item and close it in a `finally` — but closeOwnTab is deliberately
+ * best-effort (silently swallows failures, see above), so any transient miss
+ * (a redirect that took the tab's URL off matchFragment, a closed-CDP-session
+ * race, the visible browser window being touched by hand) left that tab
+ * stranded forever with zero trace, while the next item opened yet another
+ * one — tabs stacking up without limit instead of staying at one. Navigating
+ * the SAME tab in place removes the open/close pair (and thus that failure
+ * mode) entirely: there is only ever one tab to find.
+ *
+ * Throws if the tab can't be confirmed to still exist (rather than guessing
+ * and navigating whatever happens to be active) — callers should catch this,
+ * null out their cached tab, and fall back to openOwnTab for a fresh one. */
+export async function navigateOwnTab(browser: AgentBrowser, cdpUrl: string, tab: OwnedTab, url: string, matchFragment: string): Promise<OwnedTab> {
+  const own = await findOwnTab(browser, tab)
+  if (!own) {
+    throw new Error(`Owned tab (matched "${tab.matchFragment}") no longer exists — cannot reuse it.`)
+  }
+  if (!own.active) {
+    await browser.tabs({ action: 'switch', index: own.index })
+  }
+  const result = await browser.goto({ url })
+  if (!result.success) {
+    throw new Error(`Failed to navigate owned tab to ${url}: ${result.message}`)
+  }
+  await bringTabToFront(cdpUrl, matchFragment)
+  return { matchFragment }
+}

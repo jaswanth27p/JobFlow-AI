@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import tailwind from 'bun-plugin-tailwind'
 import { eq, desc, gte, sql, inArray, and } from 'drizzle-orm'
 import { getDb } from '../db/index.ts'
 import { jobs, applications, answerReviews, careerPages, careerPageScans } from '../db/schema.ts'
@@ -387,17 +388,41 @@ export function getDashboardUrl(): string | null {
   return server ? `http://127.0.0.1:${DASHBOARD_PORT}` : null
 }
 
-export function startDashboard(): void {
+/** Bundles the dashboard-ui SPA (same build `scripts/build-dashboard.ts` runs
+ * standalone) straight into src/dashboard-ui/dist, which serveStatic() reads
+ * from. Building and starting used to be two separate steps — `dev`/`start`
+ * npm scripts always ran the build first, then launched src/index.ts, so
+ * passing --no-dashboard to skip the server still paid for the build every
+ * time (the build had no way to see that flag). Folding the build into
+ * startDashboard() itself makes them one operation again, gated by the one
+ * `--no-dashboard` check in index.ts that decides whether this function is
+ * ever called at all. */
+async function buildDashboardUi(): Promise<void> {
+  const result = await Bun.build({
+    entrypoints: ['./src/dashboard-ui/index.html'],
+    outdir: './src/dashboard-ui/dist',
+    plugins: [tailwind],
+    target: 'browser',
+  })
+  if (!result.success) {
+    for (const log of result.logs) logger.error({ log }, 'dashboard: UI build error')
+    throw new Error('dashboard UI build failed')
+  }
+}
+
+export async function startDashboard(): Promise<void> {
   if (server) return
   try {
+    await buildDashboardUi()
     // Bind loopback only — this serves the user's application history and
     // personal answers; it must never be reachable from the LAN.
     server = Bun.serve({ port: DASHBOARD_PORT, hostname: '127.0.0.1', fetch: handleRequest })
     setSessionStatus('dashboard', true)
     logger.info({ port: DASHBOARD_PORT }, 'dashboard: listening')
   } catch (err) {
-    // A busy port must not take the whole app down — the dashboard is optional.
-    logger.error({ err, port: DASHBOARD_PORT }, 'dashboard: failed to start (port in use?) — continuing without it')
+    // A busy port (or a build failure) must not take the whole app down —
+    // the dashboard is optional.
+    logger.error({ err, port: DASHBOARD_PORT }, 'dashboard: failed to start (build error or port in use?) — continuing without it')
   }
 }
 

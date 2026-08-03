@@ -114,7 +114,6 @@ async function main() {
     process.exit(1)
   }
 
-  if (!process.argv.includes('--no-dashboard')) startDashboard()
   startSummaryScheduler(config.notifySummaryIntervalMinutes * 60_000)
 
   initAppState({
@@ -126,6 +125,14 @@ async function main() {
   })
 
   registerBuiltinCommands()
+
+  // Must run after initAppState — startDashboard() calls setSessionStatus(),
+  // which writes through the store setter initAppState() just created. Called
+  // before it, that write threw (caught, misreported as "port in use"), which
+  // is why the sidebar never flipped to "running" even though the server had
+  // actually bound the port. Not awaited: the UI bundle build this now
+  // includes (see buildDashboardUi()) shouldn't block browser launch below.
+  if (!process.argv.includes('--no-dashboard')) void startDashboard()
 
   await launchBootstrapBrowser('./data/browser-storage-state.json')
   await openLoginTabs('https://www.linkedin.com/login', 'https://mail.google.com/mail/')

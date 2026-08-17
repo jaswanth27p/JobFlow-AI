@@ -10,6 +10,7 @@ function makeConfig(models: AppConfig['models']): AppConfig {
     model: 'default-model',
     models,
     notifySummaryIntervalMinutes: 30,
+    autoFocusTabs: true,
     profileFiles: { resume: './resume.md', profile: './profile.json' },
     extraPrompts: { search: '', easyApply: '' },
     search: { minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 },

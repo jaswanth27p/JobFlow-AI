@@ -85,6 +85,19 @@ const browser = await chromium.launchPersistentContext(userDataDir, {
 
 process.stderr.write(`[browser-server] browser launched\n`)
 
+// Chrome closing (user closes the window, or it crashes) does NOT make this
+// Node process exit on its own — Playwright's launchPersistentContext just
+// leaves this HTTP server up with a dead browser underneath it, so every
+// later /cdp-url etc. keeps handing out a port nothing listens on anymore.
+// The parent process (session.ts / easy-apply-session.ts) only detects a
+// crash via THIS process's own exit, so without this listener that
+// detection never fires and callers are stuck retrying a dead CDP port
+// forever. Exiting here is what makes that existing crash-detection work.
+browser.on('disconnected', () => {
+  process.stderr.write(`[browser-server] browser disconnected, exiting\n`)
+  process.exit(1)
+})
+
 // Find the CDP port that Chromium assigned (from --remote-debugging-port=0).
 // Chromium writes the port to <userDataDir>/DevToolsActivePort after starting.
 let cdpPort = null

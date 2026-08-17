@@ -1,4 +1,5 @@
 import { chromium, type Browser } from 'playwright-core'
+import { getCurrentConfig } from '../config/current.ts'
 
 /**
  * agent-browser's own tab tracking (tab-guard.ts's switch/open calls) only
@@ -50,6 +51,7 @@ async function getFocusBrowser(cdpUrl: string): Promise<Browser> {
  * focus nudge failing must never break the actual automation step it's
  * supporting. */
 export async function bringTabToFront(cdpUrl: string, urlFragment: string): Promise<void> {
+  if (!getCurrentConfig().autoFocusTabs) return
   try {
     const browser = await getFocusBrowser(cdpUrl)
     for (const context of browser.contexts()) {

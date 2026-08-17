@@ -33,6 +33,12 @@ export const appConfigSchema = z.object({
     judge: z.string().optional(),
   }).default({}),
   notifySummaryIntervalMinutes: z.number().int().positive().default(30),
+  /** Whether tab-guard.ts raises the automated Chrome window to the OS-visible
+   * front on every tab switch/open (see src/browser/tab-focus.ts). Set false
+   * to stop it stealing window focus / macOS Space while you work — trades
+   * away the fix for Chrome throttling background tabs (can affect Easy Apply
+   * modal reliability). */
+  autoFocusTabs: z.boolean().default(true),
   profileFiles: z.object({
     resume: z.string(),
     profile: z.string(),

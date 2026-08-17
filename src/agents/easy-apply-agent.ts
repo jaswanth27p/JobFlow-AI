@@ -38,8 +38,18 @@ let sharedBrowserCdpUrl: string | null = null
  * tab-guard.ts's reclaim/open calls need it (to bring the right browser's tab
  * to the front — see tab-focus.ts). */
 async function getEasyApplyBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: string }> {
-  if (!sharedBrowser || !sharedBrowserCdpUrl) {
-    const cdpUrl = await getEasyApplyCdpUrl()
+  // getEasyApplyCdpUrl() is cheap once launched (returns its own cached
+  // value) but is the ONLY thing that notices the easy-apply Chrome process
+  // died and relaunches it — easy-apply-session.ts nulls its cdpUrl on an
+  // unexpected exit and hands back a fresh one on the next call. Re-fetching
+  // here on every call (instead of only when sharedBrowser was never set) is
+  // what lets this layer notice that too: without it, sharedBrowser/
+  // sharedBrowserCdpUrl stayed pointed at the dead browser's old CDP port
+  // forever after a crash/relaunch, so every apply after the first crash
+  // failed with "Failed to connect via CDP to http://<old-port>" until the
+  // whole app was restarted.
+  const cdpUrl = await getEasyApplyCdpUrl()
+  if (!sharedBrowser || sharedBrowserCdpUrl !== cdpUrl) {
     sharedBrowser = new AgentBrowser({
       cdpUrl,
       scope: 'shared',
@@ -56,6 +66,9 @@ async function getEasyApplyBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: s
     // write raw ANSI text to stdout and corrupt the opentui TUI frame.
     sharedBrowser.__setLogger(noopLogger)
     sharedBrowserCdpUrl = cdpUrl
+    // The cached tab belonged to whatever browser process just died — it
+    // can't be reused against a brand new Chrome process.
+    easyApplyTab = null
   }
   return { browser: sharedBrowser, cdpUrl: sharedBrowserCdpUrl }
 }

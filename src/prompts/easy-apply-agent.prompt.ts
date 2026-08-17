@@ -40,16 +40,22 @@ to be; the app owns opening/closing this tab for the whole application, includin
 
 Steps:
 1. Click "Easy Apply" on the current page.
-2. Step through the form. For each field/question, resolve it in this order:
+2. The form opens in a modal dialog on top of the job page, with its own internal scroll area. When
+   a field, question, or the Next/Review/Submit button isn't visible, scroll the modal's own content
+   area (the element containing the form fields), not the page behind it. Scrolling anywhere outside
+   the modal's bounds scrolls the underlying job page instead and leaves the modal content unchanged
+   — if that happens, scroll from inside the modal's visible area instead. Before every scroll action,
+   confirm the element/coordinates you're scrolling are within the modal, not the dimmed page behind it.
+3. Step through the form. For each field/question, resolve it in this order:
    a. If the field asks for a phone number, call get-phone-number and use the returned value. Do not guess, reuse a number seen elsewhere, or leave it blank — this is the only source for it, deliberately kept out of your instructions above.
    b. Otherwise, if it maps directly to a structured profile field above (email, location, work authorization, salary expectation, years of experience, links), use that value directly.
    c. Otherwise, call lookup-learned-answer with the exact on-page question text. If found is true, use that answer.
    d. Otherwise, if you can confidently infer the answer from the resume/profile content, answer it yourself.
    e. Otherwise — a genuine unknown — call ask-human-and-remember with the question, then use the returned answer.
    f. Regardless of which path (a-e) you used, call record-answer with the question, the answer you used, and which path resolved it (source: "profile", "learned", "inferred", or "human"). This is mandatory for EVERY field — it is the only record of what was actually submitted, for later human review. Do this before moving to the next field.
-3. If the form has a resume step, LinkedIn Easy Apply reuses a resume already uploaded to the candidate's LinkedIn account — it will be pre-selected automatically. Just confirm/continue past that step; do not try to upload a file. Only if the step shows no resume at all and forces a fresh upload with no way to proceed, call ask-human-and-remember asking the human to attach one manually in the visible browser, then continue once they confirm.
-4. Submit the application once all steps are complete.
-5. Call report-submission with success: true after a successful submission. If you get stuck in a way you cannot resolve, call it with success: false and one of:
+4. If the form has a resume step, LinkedIn Easy Apply reuses a resume already uploaded to the candidate's LinkedIn account — it will be pre-selected automatically. Just confirm/continue past that step; do not try to upload a file. Only if the step shows no resume at all and forces a fresh upload with no way to proceed, call ask-human-and-remember asking the human to attach one manually in the visible browser, then continue once they confirm.
+5. Submit the application once all steps are complete.
+6. Call report-submission with success: true after a successful submission. If you get stuck in a way you cannot resolve, call it with success: false and one of:
    - reason: "missing_info", question: "<the exact on-page question text>" — only if you truly could not get an answer for a specific required field (e.g. ask-human-and-remember's answer still didn't satisfy the form's validation). The app asks the human that one question immediately and retries this application right away — no separate command needed.
    - reason: "blocked" (or omit reason) — for anything else: broken page, unexpected error, application form crashed. This is not auto-retryable, so only use "missing_info" when you can name the exact question.
    Call report-submission exactly once, at the very end.

@@ -19,13 +19,18 @@ export function App() {
   const isNarrow = createMemo(() => dimensions().width < NARROW_WIDTH_THRESHOLD)
   const renderer = useRenderer()
 
-  /** Copy the current selection to the clipboard (OSC52) and flash a toast. */
+  /** Copy the current selection to the clipboard (OSC52) and flash a toast.
+   * copyToClipboardOSC52 returns false when the terminal never ack'd the
+   * write (e.g. macOS Terminal.app doesn't support OSC52 at all; iTerm2
+   * needs "Applications in terminal may access clipboard" enabled in
+   * Preferences > General > Selection) — showing "Copied" unconditionally
+   * here is what made the toast lie on unsupported terminals. */
   function copySelection(): boolean {
     const text = renderer.getSelection()?.getSelectedText()
     if (!text) return false
-    renderer.copyToClipboardOSC52(text)
+    const ok = renderer.copyToClipboardOSC52(text)
     renderer.clearSelection()
-    showToast('Copied to clipboard')
+    showToast(ok ? 'Copied to clipboard' : 'Clipboard copy unsupported by this terminal')
     return true
   }
 

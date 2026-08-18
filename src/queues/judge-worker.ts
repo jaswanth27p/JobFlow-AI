@@ -5,8 +5,8 @@ import { AgentBrowser } from '@mastra/agent-browser'
 import { getRedisConnectionOptions } from './connection.ts'
 import { getJudgeQueueCounts } from './judge-queues.ts'
 import { enqueueApplyJob } from './apply-queues.ts'
-import { getJudgeCdpUrl } from '../browser/judge-session.ts'
-import { openOwnTab, navigateOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
+import { getJudgeCdpUrl, invalidateJudgeCdpUrl } from '../browser/judge-session.ts'
+import { openOwnTab, navigateOwnTab, isBrowserConnectionError, type OwnedTab } from '../browser/tab-guard.ts'
 import { getDb } from '../db/index.ts'
 import { jobs } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -50,8 +50,15 @@ let sharedBrowserCdpUrl: string | null = null
 /** Launches (on first call) or reuses the judge worker's own dedicated
  * browser — see judge-session.ts for why this is a separate Chrome process. */
 async function getJudgeBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: string }> {
-  if (!sharedBrowser || !sharedBrowserCdpUrl) {
-    const cdpUrl = await getJudgeCdpUrl()
+  // Re-fetching getJudgeCdpUrl() on every call (not just when sharedBrowser
+  // was never set) is what lets this layer notice a relaunch — see
+  // easy-apply-agent.ts's getEasyApplyBrowser, which this mirrors. Without
+  // it, sharedBrowser/sharedBrowserCdpUrl stay pointed at a dead browser's
+  // old CDP port forever after a crash/relaunch, so every judge call after
+  // the first crash fails with "Failed to connect via CDP" until the whole
+  // app is restarted.
+  const cdpUrl = await getJudgeCdpUrl()
+  if (!sharedBrowser || sharedBrowserCdpUrl !== cdpUrl) {
     sharedBrowser = new AgentBrowser({
       cdpUrl,
       scope: 'shared',
@@ -64,8 +71,22 @@ async function getJudgeBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: strin
     })
     sharedBrowser.__setLogger(noopLogger)
     sharedBrowserCdpUrl = cdpUrl
+    // The cached tab belonged to whatever browser process just died — it
+    // can't be reused against a brand new Chrome process.
+    judgeTab = null
   }
   return { browser: sharedBrowser, cdpUrl: sharedBrowserCdpUrl }
+}
+
+/** Drops every cached handle on a browser we just learned is dead — see
+ * easy-apply-agent.ts's resetEasyApplyBrowser for the full rationale (same
+ * pattern, scoped to the judge browser). `staleCdpUrl` must be the cdpUrl
+ * the caller was actually using when it failed. */
+function resetJudgeBrowser(staleCdpUrl: string): void {
+  invalidateJudgeCdpUrl(staleCdpUrl)
+  sharedBrowser = null
+  sharedBrowserCdpUrl = null
+  judgeTab = null
 }
 
 /** The one tab this worker ever has open — reused across every job (navigate
@@ -86,6 +107,33 @@ async function ensureJudgeTab(browser: AgentBrowser, cdpUrl: string, url: string
   }
   judgeTab = await openOwnTab(browser, cdpUrl, url, matchFragment)
   return judgeTab
+}
+
+interface AcquiredJudgeTab {
+  browser: AgentBrowser
+  cdpUrl: string
+  tab: OwnedTab
+}
+
+/** Fail-proof entry point for the judge tab — see easy-apply-agent.ts's
+ * acquireEasyApplyTab for the full rationale. Checks the existing
+ * browser/tab is actually usable and, if the underlying browser PROCESS is
+ * dead (not just the tab), forces a full relaunch and opens one fresh tab on
+ * the new browser before giving up. */
+async function acquireJudgeTab(jobId: string, applyUrl: string): Promise<AcquiredJudgeTab> {
+  const matchFragment = `/jobs/view/${jobId}`
+  let { browser, cdpUrl } = await getJudgeBrowser()
+  try {
+    const tab = await ensureJudgeTab(browser, cdpUrl, applyUrl, matchFragment)
+    return { browser, cdpUrl, tab }
+  } catch (err) {
+    if (!isBrowserConnectionError(err)) throw err
+    logger.warn({ err, jobId }, 'judge: browser connection is dead — forcing relaunch and retrying once')
+    resetJudgeBrowser(cdpUrl)
+    ;({ browser, cdpUrl } = await getJudgeBrowser())
+    const tab = await ensureJudgeTab(browser, cdpUrl, applyUrl, matchFragment)
+    return { browser, cdpUrl, tab }
+  }
 }
 
 /** Persists a judge verdict and routes it — the DB-insert half of what used
@@ -172,7 +220,7 @@ export async function recordJudgeVerdict(
  * rather than null — UNLESS the failure was a deliberate shutdown abort
  * (`signal.aborted`), which is transient by definition and must also come
  * back as null, not a permanently-recorded skip. */
-async function readJobTextAndJudge(jobId: string, browser: AgentBrowser, signal?: AbortSignal): Promise<Awaited<ReturnType<typeof judgeJob>> | null> {
+async function readJobTextAndJudge(jobId: string, browser: AgentBrowser, cdpUrl: string, signal?: AbortSignal): Promise<Awaited<ReturnType<typeof judgeJob>> | null> {
   let jobText = ''
   try {
     for (let attempt = 0; attempt < DETAIL_PANE_MAX_ATTEMPTS; attempt++) {
@@ -183,6 +231,10 @@ async function readJobTextAndJudge(jobId: string, browser: AgentBrowser, signal?
       if (jobText) break
     }
   } catch (err) {
+    // Browser died after the tab was already open OK (mid-read) — reset now
+    // rather than leaving the cache pointed at a dead browser/cdpUrl until
+    // the async exit-event race (see judge-session.ts) happens to catch up.
+    if (isBrowserConnectionError(err)) resetJudgeBrowser(cdpUrl)
     logger.error({ err, jobId }, 'judge: failed to read job detail pane')
     pushLog(JUDGE_TAB, `Could not load job ${jobId} — will retry on a future scan. (${summarizeError(err)})`)
     return null
@@ -224,18 +276,19 @@ export async function processJudgeJob(jobId: string, sourceUrl: string, signal?:
     return
   }
 
-  const { browser, cdpUrl } = await getJudgeBrowser()
   const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
 
+  let browser: AgentBrowser
+  let cdpUrl: string
   try {
-    await ensureJudgeTab(browser, cdpUrl, applyUrl, `/jobs/view/${jobId}`)
+    ;({ browser, cdpUrl } = await acquireJudgeTab(jobId, applyUrl))
   } catch (err) {
     logger.error({ err, jobId }, 'judge: failed to open job tab')
     pushLog(JUDGE_TAB, `Could not open job ${jobId} — will retry on a future scan. (${summarizeError(err)})`)
     return
   }
 
-  const verdict = await readJobTextAndJudge(jobId, browser, signal)
+  const verdict = await readJobTextAndJudge(jobId, browser, cdpUrl, signal)
   if (verdict) await recordJudgeVerdict(jobId, sourceUrl, applyUrl, verdict)
 }
 

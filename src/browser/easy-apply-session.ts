@@ -168,6 +168,29 @@ export async function getEasyApplyCdpUrl(): Promise<string> {
   return launching
 }
 
+/** Forces the NEXT getEasyApplyCdpUrl() call to relaunch a fresh browser
+ * process, instead of relying solely on the browser-server child's own exit
+ * event (spawnAndWaitReady's proc.exited handler above) to null the cache.
+ * That event is async — a caller can ask for the cdpUrl, get the
+ * still-cached (but actually dead) one, and fail to connect BEFORE the exit
+ * handler has run. Callers that hit that failure call this immediately
+ * instead of waiting the race out. Guarded by staleUrl so a caller that lost
+ * the race against an already-completed relaunch (or against another job
+ * hitting this same path first) doesn't clobber the new browser underneath
+ * it. Best-effort kills the underlying process too, in case it's still
+ * limping along rather than fully exited (e.g. the browser disconnected but
+ * the Node process hasn't noticed yet). */
+export function invalidateEasyApplyCdpUrl(staleUrl: string): void {
+  if (cdpUrl !== staleUrl) return
+  logger.warn({ staleUrl }, 'easy-apply browser: forcing relaunch after a failed CDP connection')
+  cdpUrl = null
+  launching = null
+  const deadProc = serverProc
+  serverPort = null
+  serverProc = null
+  deadProc?.kill()
+}
+
 export function isEasyApplyBrowserRunning(): boolean {
   return serverPort !== null
 }

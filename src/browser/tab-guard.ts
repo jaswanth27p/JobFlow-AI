@@ -23,6 +23,36 @@ export interface OwnedTab {
   matchFragment: string
 }
 
+/** Message fragments that mean "the browser/tab is actually gone", not just a
+ * normal tool failure (bad selector, navigation timeout on a live page). The
+ * DISCONNECTION_PATTERNS list mirrors @mastra/core's own
+ * MastraBrowser.isDisconnectionError (node_modules/@mastra/core/dist/browser/index.js)
+ * — that's what checkBrowserAlive uses internally to decide whether to
+ * silently retry. "Failed to connect via CDP" is agent-browser's own message
+ * (node_modules/agent-browser/dist/browser.js's connectViaCDP) for the case
+ * checkBrowserAlive DOESN'T cover: reconnecting to a cdpUrl whose Chrome
+ * process is entirely gone — that's a real thrown error, not a silent
+ * false-from-checkBrowserAlive. Callers use this to tell "browser is dead,
+ * force a full relaunch" apart from "this one action failed, just retry it". */
+const CONNECTION_DEAD_PATTERNS = [
+  'target closed',
+  'target page, context or browser has been closed',
+  'browser has been closed',
+  'connection closed',
+  'protocol error',
+  'session closed',
+  'browser has disconnected',
+  'closed externally',
+  'failed to connect via cdp',
+  'no browser context found',
+  'no page found',
+]
+
+export function isBrowserConnectionError(err: unknown): boolean {
+  const message = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  return CONNECTION_DEAD_PATTERNS.some((pattern) => message.includes(pattern))
+}
+
 interface TabListEntry {
   index: number
   url: string

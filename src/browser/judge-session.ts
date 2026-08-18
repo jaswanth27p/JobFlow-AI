@@ -163,6 +163,23 @@ export async function getJudgeCdpUrl(): Promise<string> {
   return launching
 }
 
+/** Forces the NEXT getJudgeCdpUrl() call to relaunch a fresh browser process
+ * — see easy-apply-session.ts's invalidateEasyApplyCdpUrl for why this is
+ * needed alongside (not instead of) the passive proc.exited detection above:
+ * that event is async and a caller can lose the race against it. Guarded by
+ * staleUrl so a caller that lost the race against an already-completed
+ * relaunch doesn't clobber the new browser. */
+export function invalidateJudgeCdpUrl(staleUrl: string): void {
+  if (cdpUrl !== staleUrl) return
+  logger.warn({ staleUrl }, 'judge browser: forcing relaunch after a failed CDP connection')
+  cdpUrl = null
+  launching = null
+  const deadProc = serverProc
+  serverPort = null
+  serverProc = null
+  deadProc?.kill()
+}
+
 export function isJudgeBrowserRunning(): boolean {
   return serverPort !== null
 }

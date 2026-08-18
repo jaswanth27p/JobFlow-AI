@@ -40,6 +40,7 @@ export default {
   // Per-agent overrides — unset falls back to `model` above. e.g.:
   //   models: { easyApply: "opencode-go/deepseek-v4-pro" },
   models: {},
+  autoFocusTabs: false,
   // How often (minutes) to batch external-job-found / easy-apply-result
   // counts into one desktop notification.
   notifySummaryIntervalMinutes: 30,

@@ -7,8 +7,8 @@ import { Agent } from '@mastra/core/agent'
 import { noopLogger } from '@mastra/core/logger'
 import { createTool } from '@mastra/core/tools'
 import { AgentBrowser } from '@mastra/agent-browser'
-import { getEasyApplyCdpUrl } from '../browser/easy-apply-session.ts'
-import { openOwnTab, reclaimOwnTab, navigateOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
+import { getEasyApplyCdpUrl, invalidateEasyApplyCdpUrl } from '../browser/easy-apply-session.ts'
+import { openOwnTab, reclaimOwnTab, navigateOwnTab, isBrowserConnectionError, type OwnedTab } from '../browser/tab-guard.ts'
 import { getCurrentConfig } from '../config/current.ts'
 import { resolveModel } from '../config/resolve-model.ts'
 import { getDb } from '../db/index.ts'
@@ -73,6 +73,23 @@ async function getEasyApplyBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: s
   return { browser: sharedBrowser, cdpUrl: sharedBrowserCdpUrl }
 }
 
+/** Drops every cached handle on a browser we just learned is dead (a CDP
+ * connection failure — see isBrowserConnectionError) so the NEXT
+ * getEasyApplyBrowser() call is forced to go through getEasyApplyCdpUrl()'s
+ * relaunch path instead of reusing a stale AgentBrowser instance whose own
+ * internal reconnect (agent-browser's checkBrowserAlive → launch() →
+ * doLaunch()) would just retry the SAME dead cdpUrl baked into it at
+ * construction and fail the same way again. `staleCdpUrl` must be the cdpUrl
+ * the caller was actually using when it failed — passed through to
+ * invalidateEasyApplyCdpUrl so a caller that lost the race against an
+ * already-completed relaunch elsewhere doesn't stomp on the new one. */
+function resetEasyApplyBrowser(staleCdpUrl: string): void {
+  invalidateEasyApplyCdpUrl(staleCdpUrl)
+  sharedBrowser = null
+  sharedBrowserCdpUrl = null
+  easyApplyTab = null
+}
+
 /** The one tab this agent ever has open — reused across every job (navigate
  * in place) instead of opening a new one and closing it per job. See
  * navigateOwnTab's doc comment (tab-guard.ts) for why: closeOwnTab is
@@ -92,6 +109,37 @@ async function ensureEasyApplyTab(browser: AgentBrowser, cdpUrl: string, url: st
   }
   easyApplyTab = await openOwnTab(browser, cdpUrl, url, matchFragment)
   return easyApplyTab
+}
+
+interface AcquiredTab {
+  browser: AgentBrowser
+  cdpUrl: string
+  tab: OwnedTab
+}
+
+/** Fail-proof entry point for getting a tab this job can actually use: checks
+ * the existing browser/tab is still alive (ensureEasyApplyTab's own
+ * reuse-or-open-fresh logic below handles a merely-missing TAB), and on top
+ * of that, if the underlying BROWSER PROCESS itself is dead (crashed, window
+ * closed — see isBrowserConnectionError), forces a full relaunch and opens
+ * one fresh tab on the new browser before giving up. Without this, a dead
+ * browser reused via the stale sharedBrowser/cdpUrl cache fails immediately
+ * with "Failed to connect via CDP" and the job is written off — even though
+ * a perfectly good retry (relaunch + fresh tab) was one step away. */
+async function acquireEasyApplyTab(jobId: string, applyUrl: string): Promise<AcquiredTab> {
+  const matchFragment = `/jobs/view/${jobId}`
+  let { browser, cdpUrl } = await getEasyApplyBrowser()
+  try {
+    const tab = await ensureEasyApplyTab(browser, cdpUrl, applyUrl, matchFragment)
+    return { browser, cdpUrl, tab }
+  } catch (err) {
+    if (!isBrowserConnectionError(err)) throw err
+    logger.warn({ err, jobId }, 'easy-apply: browser connection is dead — forcing relaunch and retrying once')
+    resetEasyApplyBrowser(cdpUrl)
+    ;({ browser, cdpUrl } = await getEasyApplyBrowser())
+    const tab = await ensureEasyApplyTab(browser, cdpUrl, applyUrl, matchFragment)
+    return { browser, cdpUrl, tab }
+  }
 }
 
 export interface JobRecord {
@@ -297,15 +345,17 @@ export async function processEasyApplyJob(jobId: string): Promise<void> {
   const config = getCurrentConfig()
 
   const jobRecord: JobRecord = { id: job.id, title: job.title, company: job.company, applyUrl: job.applyUrl }
-  const { browser, cdpUrl } = await getEasyApplyBrowser()
 
   // Opened/reused by code, not the LLM (see tab-guard.ts) — this is the one
   // tab this agent ever acts on, reused across every retry attempt below AND
   // across every job this worker ever processes (navigated in place, never
-  // closed between jobs).
+  // closed between jobs). acquireEasyApplyTab is fail-proof against a dead
+  // browser process, not just a missing tab — see its doc comment.
+  let browser: AgentBrowser
+  let cdpUrl: string
   let ownTab: OwnedTab
   try {
-    ownTab = await ensureEasyApplyTab(browser, cdpUrl, jobRecord.applyUrl, `/jobs/view/${jobRecord.id}`)
+    ;({ browser, cdpUrl, tab: ownTab } = await acquireEasyApplyTab(jobRecord.id, jobRecord.applyUrl))
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     await writeFailedApplication(jobRecord, `Failed to open apply tab: ${message}`, 'blocked', null, [])
@@ -384,6 +434,13 @@ async function processEasyApplyJobInTab(
         onStepFinish: () => reclaimOwnTab(browser, cdpUrl, ownTab),
       })
     } catch (err) {
+      // A connection error here means the browser died mid-job (after the
+      // tab was already open OK) — reset the cache now rather than leaving
+      // it pointed at a dead browser/cdpUrl until the async exit-event race
+      // (see easy-apply-session.ts) happens to catch up. The NEXT job (worker
+      // pickup or a manual /retry-failed-applications) then gets a genuinely
+      // fresh relaunch on its first attempt instead of failing the same way.
+      if (isBrowserConnectionError(err)) resetEasyApplyBrowser(cdpUrl)
       if (!ctx.reported) {
         const message = err instanceof Error ? err.message : String(err)
         await writeFailedApplication(jobRecord, message, 'blocked', null, ctx.answers)

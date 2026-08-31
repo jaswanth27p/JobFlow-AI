@@ -81,29 +81,40 @@ afterAll(async () => {
 
 describe('notify click handler rejection path', () => {
   test('open() rejection in click handler is caught without throwing or unhandled rejection', async () => {
-    // Call notify with an event that has an openUrl
-    notify({
-      kind: 'external-job-found',
-      title: 'Engineer',
-      company: 'Acme',
-      applyUrl: 'https://acme.com/jobs/1',
-    })
+    // This exercises node-notifier's click-to-open path, which notify() only
+    // takes on non-macOS platforms (macOS shells out to osascript instead —
+    // see notify.ts). Pin process.platform so this test's intent holds
+    // regardless of which OS actually runs the suite.
+    const realPlatform = process.platform
+    Object.defineProperty(process, 'platform', { value: 'win32' })
 
-    // Verify the click handler was registered
-    expect(capturedClickCallback).toBeDefined()
-    expect(typeof capturedClickCallback).toBe('function')
+    try {
+      // Call notify with an event that has an openUrl
+      notify({
+        kind: 'external-job-found',
+        title: 'Engineer',
+        company: 'Acme',
+        applyUrl: 'https://acme.com/jobs/1',
+      })
 
-    // Invoke the click handler manually - it should not throw synchronously
-    // (The async rejection from open() is handled by the .catch() block in notify.ts)
-    expect(() => {
-      capturedClickCallback!()
-    }).not.toThrow()
+      // Verify the click handler was registered
+      expect(capturedClickCallback).toBeDefined()
+      expect(typeof capturedClickCallback).toBe('function')
 
-    // Give any pending promise microtasks a chance to settle.
-    // If there were an unhandled promise rejection, it would manifest as:
-    // - An unhandledRejection event (which bun test catches and reports)
-    // - A console error/warning
-    // We await a microtask to ensure the .catch() handler runs.
-    await new Promise((resolve) => setTimeout(resolve, 0))
+      // Invoke the click handler manually - it should not throw synchronously
+      // (The async rejection from open() is handled by the .catch() block in notify.ts)
+      expect(() => {
+        capturedClickCallback!()
+      }).not.toThrow()
+
+      // Give any pending promise microtasks a chance to settle.
+      // If there were an unhandled promise rejection, it would manifest as:
+      // - An unhandledRejection event (which bun test catches and reports)
+      // - A console error/warning
+      // We await a microtask to ensure the .catch() handler runs.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      Object.defineProperty(process, 'platform', { value: realPlatform })
+    }
   })
 })

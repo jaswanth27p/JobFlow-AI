@@ -53,12 +53,39 @@ export function buildNotification(event: NotifyEvent): BuiltNotification {
   }
 }
 
+/** node-notifier's macOS backend shells out to a bundled `terminal-notifier`
+ * binary, which routinely fails silently on modern macOS (unsigned binary,
+ * Notification Center permission never prompted/granted, or just never
+ * fires) — no exception, the notification just never appears. `osascript`
+ * (built into every macOS install) reliably raises a real Notification
+ * Center banner via `display notification`, so macOS bypasses node-notifier
+ * entirely and shells out to it directly. Windows keeps node-notifier (its
+ * toast backend works fine there). */
+function escapeAppleScriptString(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+function notifyMac(built: BuiltNotification): void {
+  const script = `display notification "${escapeAppleScriptString(built.message)}" with title "${escapeAppleScriptString(built.title)}"`
+  try {
+    Bun.spawn(['osascript', '-e', script], { stdout: 'ignore', stderr: 'ignore' })
+  } catch (err) {
+    logger.error({ err, built }, 'notify: osascript failed to send notification')
+  }
+}
+
 /** Fires an OS desktop notification for the given event. Best-effort only —
  * a missing/broken OS notification backend (no daemon, permissions denied,
  * etc.) must never crash an agent run, so every failure path here is caught
  * and logged, never thrown. */
 export function notify(event: NotifyEvent): void {
   const built = buildNotification(event)
+
+  if (process.platform === 'darwin') {
+    notifyMac(built)
+    return
+  }
+
   try {
     notifier.notify({ title: built.title, message: built.message, sound: false, wait: false }, (err) => {
       if (err) logger.error({ err, event }, 'notify: node-notifier reported an error')

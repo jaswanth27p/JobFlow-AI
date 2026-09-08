@@ -8,7 +8,7 @@ import { AgentBrowser } from '@mastra/agent-browser'
 import type { ToolCallChunk, ToolResultChunk } from '@mastra/core/stream'
 import { getSharedCdpUrl } from '../browser/session.ts'
 import { getCurrentConfig } from '../config/current.ts'
-import { resolveModel } from '../config/resolve-model.ts'
+import { modelConfig, resolveModel } from '../config/resolve-model.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, careerPages, careerPageScans } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -258,7 +258,7 @@ export async function runCareerCheck(): Promise<void> {
             id: 'career-scan-agent',
             name: 'Career Page Scan Agent',
             instructions,
-            model: resolveModel(getCurrentConfig(), appState.settings.model, 'career'),
+            model: modelConfig(resolveModel(getCurrentConfig(), appState.settings.model, 'career')),
             browser,
             inputProcessors: [noOpBrowserContextProcessor],
             tools: {

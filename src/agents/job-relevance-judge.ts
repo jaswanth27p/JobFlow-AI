@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { Agent } from '@mastra/core/agent'
 import { noopLogger } from '@mastra/core/logger'
+import { modelConfig } from '../config/resolve-model.ts'
 import { buildJudgeInstructions } from '../prompts/job-relevance-judge.prompt.ts'
 
 const judgeVerdictSchema = z.object({
@@ -49,7 +50,7 @@ export async function judgeJob(jobPageText: string, model: string, signal?: Abor
     id: 'job-relevance-judge',
     name: 'Job Relevance Judge',
     instructions,
-    model,
+    model: modelConfig(model),
   })
   agent.__setLogger(noopLogger)
 

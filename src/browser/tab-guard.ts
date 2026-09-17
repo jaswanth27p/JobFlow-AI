@@ -53,6 +53,23 @@ export function isBrowserConnectionError(err: unknown): boolean {
   return CONNECTION_DEAD_PATTERNS.some((pattern) => message.includes(pattern))
 }
 
+/** True only for navigateOwnTab's own "the tab itself is gone" error (tab
+ * closed externally, or by another process) — as opposed to a goto failure on
+ * a tab that's still there (nav timeout, DNS failure, offline). Every
+ * ensure*Tab (search/judge/easy-apply) used to null its cached tab and open a
+ * brand-new one on ANY navigateOwnTab error, including a plain network
+ * failure — that abandoned the still-open old tab (never closed — closeOwnTab
+ * is only ever called from ensure*Tab's now-removed reopen path) and opened
+ * one fresh tab per failed item, so a sustained outage produced one new tab
+ * per queued job instead of reusing the one tab it already had. Callers
+ * should only null+reopen when this (or isBrowserConnectionError) is true;
+ * any other navigateOwnTab failure means the tab is still fine and the error
+ * should just propagate. */
+export function isOwnedTabGoneError(err: unknown): boolean {
+  const message = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  return message.includes('no longer exists')
+}
+
 interface TabListEntry {
   index: number
   url: string

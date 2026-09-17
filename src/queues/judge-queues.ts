@@ -22,7 +22,23 @@ export async function enqueueJudgeJob(jobId: string, sourceUrl: string): Promise
   // completed/failed BullMQ job stays in Redis forever. The Postgres `jobs`
   // table is the durable record; Redis only needs enough history to debug
   // recent runs.
-  await queue.add('judge', { jobId, sourceUrl }, { jobId: `judge-${jobId}`, removeOnComplete: 500, removeOnFail: 1000 })
+  await queue.add(
+    'judge',
+    { jobId, sourceUrl },
+    {
+      jobId: `judge-${jobId}`,
+      removeOnComplete: 500,
+      removeOnFail: 1000,
+      // Transient failures (nav timeout, a stale tab, a browser relaunch
+      // race) now throw instead of silently resolving — see
+      // processJudgeJob — so BullMQ needs real retry/backoff or a single
+      // hiccup still drops the job on its first (only) attempt. Exponential
+      // backoff (30s, 60s, 120s) gives a short blip room to clear without
+      // hammering LinkedIn.
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 30_000 },
+    },
+  )
 }
 
 export async function getJudgeQueueCounts(): Promise<{ waiting: number; active: number }> {

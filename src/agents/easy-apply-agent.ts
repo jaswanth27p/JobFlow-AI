@@ -8,7 +8,7 @@ import { noopLogger } from '@mastra/core/logger'
 import { createTool } from '@mastra/core/tools'
 import { AgentBrowser } from '@mastra/agent-browser'
 import { getEasyApplyCdpUrl, invalidateEasyApplyCdpUrl } from '../browser/easy-apply-session.ts'
-import { openOwnTab, reclaimOwnTab, navigateOwnTab, isBrowserConnectionError, type OwnedTab } from '../browser/tab-guard.ts'
+import { openOwnTab, reclaimOwnTab, navigateOwnTab, isBrowserConnectionError, isOwnedTabGoneError, type OwnedTab } from '../browser/tab-guard.ts'
 import { getCurrentConfig } from '../config/current.ts'
 import { modelConfig, resolveModel } from '../config/resolve-model.ts'
 import { getDb } from '../db/index.ts'
@@ -20,6 +20,7 @@ import { waitForAnswer } from '../state/prompt-channel.ts'
 import { recordEasyApplyResult } from '../notify/summary-aggregator.ts'
 import { summarizeError } from '../utils/error-summary.ts'
 import { logger } from '../utils/logger.ts'
+import { waitForNetwork } from '../utils/network.ts'
 import { noOpBrowserContextProcessor } from './no-op-browser-context-processor.ts'
 import { buildApplyInstructions } from '../prompts/easy-apply-agent.prompt.ts'
 import type { AppConfig } from '../config/schema.ts'
@@ -103,6 +104,11 @@ async function ensureEasyApplyTab(browser: AgentBrowser, cdpUrl: string, url: st
       easyApplyTab = await navigateOwnTab(browser, cdpUrl, easyApplyTab, url, matchFragment)
       return easyApplyTab
     } catch (err) {
+      // Only a genuinely-gone tab (or dead browser) warrants abandoning it and
+      // opening a new one — a plain nav failure (offline, DNS, timeout) means
+      // the tab is still there, so reopening would leak it. See
+      // isOwnedTabGoneError's doc comment (tab-guard.ts) for the full story.
+      if (!isBrowserConnectionError(err) && !isOwnedTabGoneError(err)) throw err
       logger.warn({ err }, 'easy-apply: could not reuse existing tab, opening a fresh one')
       easyApplyTab = null
     }
@@ -327,7 +333,7 @@ export function createReportSubmissionTool(job: JobRecord, browser: AgentBrowser
   })
 }
 
-export async function processEasyApplyJob(jobId: string): Promise<void> {
+export async function processEasyApplyJob(jobId: string, signal?: AbortSignal): Promise<void> {
   const db = getDb()
   const rows = await db.select().from(jobs).where(eq(jobs.id, jobId))
   const job = rows[0]
@@ -341,6 +347,11 @@ export async function processEasyApplyJob(jobId: string): Promise<void> {
     pushLog(EASY_TAB, `Job ${jobId} already ${job.status} — skipping.`)
     return
   }
+
+  // Blocks here (checking every minute) instead of racing into a doomed tab
+  // open — stops a connectivity drop from burning through every queued
+  // application one after another, each written off as 'failed'.
+  if ((await waitForNetwork(EASY_TAB, signal)) === 'aborted') return
 
   const config = getCurrentConfig()
 

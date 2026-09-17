@@ -6,7 +6,8 @@ import { getRedisConnectionOptions } from './connection.ts'
 import { getJudgeQueueCounts } from './judge-queues.ts'
 import { enqueueApplyJob } from './apply-queues.ts'
 import { getJudgeCdpUrl, invalidateJudgeCdpUrl } from '../browser/judge-session.ts'
-import { openOwnTab, navigateOwnTab, isBrowserConnectionError, type OwnedTab } from '../browser/tab-guard.ts'
+import { openOwnTab, navigateOwnTab, isBrowserConnectionError, isOwnedTabGoneError, type OwnedTab } from '../browser/tab-guard.ts'
+import { waitForNetwork } from '../utils/network.ts'
 import { getDb } from '../db/index.ts'
 import { jobs } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -101,6 +102,11 @@ async function ensureJudgeTab(browser: AgentBrowser, cdpUrl: string, url: string
       judgeTab = await navigateOwnTab(browser, cdpUrl, judgeTab, url, matchFragment)
       return judgeTab
     } catch (err) {
+      // Only a genuinely-gone tab (or dead browser) warrants abandoning it and
+      // opening a new one — a plain nav failure (offline, DNS, timeout) means
+      // the tab is still there, so reopening would leak it. See
+      // isOwnedTabGoneError's doc comment for the full story.
+      if (!isBrowserConnectionError(err) && !isOwnedTabGoneError(err)) throw err
       logger.warn({ err }, 'judge: could not reuse existing tab, opening a fresh one')
       judgeTab = null
     }
@@ -236,12 +242,12 @@ async function readJobTextAndJudge(jobId: string, browser: AgentBrowser, cdpUrl:
     // the async exit-event race (see judge-session.ts) happens to catch up.
     if (isBrowserConnectionError(err)) resetJudgeBrowser(cdpUrl)
     logger.error({ err, jobId }, 'judge: failed to read job detail pane')
-    pushLog(JUDGE_TAB, `Could not load job ${jobId} — will retry on a future scan. (${summarizeError(err)})`)
+    pushLog(JUDGE_TAB, `Could not load job ${jobId} — will retry. (${summarizeError(err)})`)
     return null
   }
 
   if (!jobText) {
-    pushLog(JUDGE_TAB, `Could not read job ${jobId}'s detail pane (empty) — will retry on a future scan.`)
+    pushLog(JUDGE_TAB, `Could not read job ${jobId}'s detail pane (empty) — will retry.`)
     return null
   }
 
@@ -262,12 +268,17 @@ async function readJobTextAndJudge(jobId: string, browser: AgentBrowser, cdpUrl:
   }
 }
 
-/** Judges one queued job: re-checks for a duplicate delivery, opens its
- * detail page directly (no click-through from a list), judges it, records
- * and routes the result. Never throws — every failure path logs and returns
- * so the BullMQ worker always moves on to the next job. An optional signal
- * lets stopJudgeWorker() cancel the in-flight wait/judge call immediately on
- * shutdown instead of waiting out DETAIL_PANE_WAIT_MS/JUDGE_TIMEOUT_MS. */
+/** Judges one queued job: re-checks for a duplicate delivery, waits out any
+ * connectivity outage, opens the detail page directly (no click-through from
+ * a list), judges it, records and routes the result. A transient failure
+ * (tab wouldn't open, detail pane wouldn't read) throws so BullMQ retries it
+ * with backoff (see enqueueJudgeJob) instead of the job silently vanishing on
+ * one bad attempt — a genuine judgment failure (page read fine, the judge
+ * call itself failed) is NOT transient and still resolves normally as a safe
+ * 'skip' verdict, see readJobTextAndJudge. An optional signal lets
+ * stopJudgeWorker() cancel the in-flight wait/judge call immediately on
+ * shutdown instead of waiting out DETAIL_PANE_WAIT_MS/JUDGE_TIMEOUT_MS or a
+ * network-outage pause. */
 export async function processJudgeJob(jobId: string, sourceUrl: string, signal?: AbortSignal): Promise<void> {
   const db = getDb()
   const existing = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.id, jobId))
@@ -275,6 +286,12 @@ export async function processJudgeJob(jobId: string, sourceUrl: string, signal?:
     pushLog(JUDGE_TAB, `Job ${jobId} already recorded — skipping (duplicate delivery).`)
     return
   }
+
+  // Blocks here (checking every minute) instead of racing straight into a
+  // doomed tab-open — this is what stops a connectivity drop from burning
+  // through every queued job one after another. See waitForNetwork's doc
+  // comment.
+  if ((await waitForNetwork(JUDGE_TAB, signal)) === 'aborted') return
 
   const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
 
@@ -284,12 +301,23 @@ export async function processJudgeJob(jobId: string, sourceUrl: string, signal?:
     ;({ browser, cdpUrl } = await acquireJudgeTab(jobId, applyUrl))
   } catch (err) {
     logger.error({ err, jobId }, 'judge: failed to open job tab')
-    pushLog(JUDGE_TAB, `Could not open job ${jobId} — will retry on a future scan. (${summarizeError(err)})`)
-    return
+    pushLog(JUDGE_TAB, `Could not open job ${jobId} — will retry. (${summarizeError(err)})`)
+    // Throw (rather than swallow) so BullMQ retries this job with backoff —
+    // see enqueueJudgeJob's attempts/backoff config. Previously this always
+    // resolved quietly, which meant BullMQ marked the job "completed" on the
+    // very first failure with zero retry and zero DB trace to recover it by.
+    throw err
   }
 
+  if (signal?.aborted) return
   const verdict = await readJobTextAndJudge(jobId, browser, cdpUrl, signal)
-  if (verdict) await recordJudgeVerdict(jobId, sourceUrl, applyUrl, verdict)
+  if (signal?.aborted) return
+  if (!verdict) {
+    // A transient read failure (not a deliberate abort, handled above) —
+    // throw so BullMQ retries instead of dropping the job with no way back.
+    throw new Error(`judge: could not read job ${jobId}'s detail page`)
+  }
+  await recordJudgeVerdict(jobId, sourceUrl, applyUrl, verdict)
 }
 
 let worker: Worker | null = null

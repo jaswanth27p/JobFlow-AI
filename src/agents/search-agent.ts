@@ -4,7 +4,7 @@ import { noopLogger } from '@mastra/core/logger'
 import { AgentBrowser } from '@mastra/agent-browser'
 import type { Page } from 'playwright-core'
 import { getSharedCdpUrl } from '../browser/session.ts'
-import { openOwnTab, navigateOwnTab, reclaimOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
+import { openOwnTab, navigateOwnTab, reclaimOwnTab, isBrowserConnectionError, isOwnedTabGoneError, type OwnedTab } from '../browser/tab-guard.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, searchRuns } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -12,6 +12,7 @@ import { waitForAnswer } from '../state/prompt-channel.ts'
 import { enqueueJudgeJob } from '../queues/judge-queues.ts'
 import { logger } from '../utils/logger.ts'
 import { summarizeError } from '../utils/error-summary.ts'
+import { waitForNetwork } from '../utils/network.ts'
 
 const SEARCH_TAB = 'search' as const
 
@@ -80,6 +81,11 @@ async function ensureSearchTab(browser: AgentBrowser, cdpUrl: string, url: strin
       searchTab = await navigateOwnTab(browser, cdpUrl, searchTab, url, matchFragment)
       return searchTab
     } catch (err) {
+      // Only a genuinely-gone tab (or dead browser) warrants abandoning it and
+      // opening a new one — a plain nav failure (offline, DNS, timeout) means
+      // the tab is still there, so reopening would leak it. See
+      // isOwnedTabGoneError's doc comment (tab-guard.ts) for the full story.
+      if (!isBrowserConnectionError(err) && !isOwnedTabGoneError(err)) throw err
       logger.warn({ err }, 'search: could not reuse existing tab, opening a fresh one')
       searchTab = null
     }
@@ -352,6 +358,12 @@ async function scanOneUrl(entry: ScanUrlEntry, ctx: ScanRunContext, browser: Age
   while (pageIndex < MAX_PAGES_PER_URL) {
     if (ctx.signal.aborted) return 'aborted'
 
+    // Blocks here (checking every minute) instead of racing into a doomed
+    // page.goto — stops a connectivity drop mid-scan from thrashing through
+    // every remaining page with nothing to show for it.
+    if ((await waitForNetwork(SEARCH_TAB, ctx.signal)) === 'aborted') return 'aborted'
+    if (ctx.signal.aborted) return 'aborted'
+
     await reclaimOwnTab(browser, cdpUrl, ownTab)
     const manager = await browser.getManagerForThread()
     const page = manager.getPage()
@@ -441,6 +453,9 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
     const triedUrls: string[] = []
 
     for (const entry of entries) {
+      if (abort.signal.aborted) break
+
+      if ((await waitForNetwork(SEARCH_TAB, abort.signal)) === 'aborted') break
       if (abort.signal.aborted) break
 
       setAgentStatus(SEARCH_TAB, 'running', 'scanning...')

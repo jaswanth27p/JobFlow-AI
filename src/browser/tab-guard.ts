@@ -33,7 +33,10 @@ export interface OwnedTab {
  * checkBrowserAlive DOESN'T cover: reconnecting to a cdpUrl whose Chrome
  * process is entirely gone — that's a real thrown error, not a silent
  * false-from-checkBrowserAlive. Callers use this to tell "browser is dead,
- * force a full relaunch" apart from "this one action failed, just retry it". */
+ * force a full relaunch" apart from "this one action failed, just retry it".
+ * A renderer crash (PAGE_CRASH_PATTERNS, below) is folded into the same
+ * "unusable handle, replace it" bucket by isBrowserConnectionError even though
+ * the browser process itself is still up. */
 const CONNECTION_DEAD_PATTERNS = [
   'target closed',
   'target page, context or browser has been closed',
@@ -48,9 +51,26 @@ const CONNECTION_DEAD_PATTERNS = [
   'no page found',
 ]
 
+/** Playwright's renderer-crash failures. The browser PROCESS is still alive
+ * here (so it isn't a real CDP connection loss), but the tab's renderer is
+ * dead and every later goto on that same tab fails the same way — a cached
+ * owned tab in this state is unusable exactly like one that was closed
+ * externally. Kept separate from CONNECTION_DEAD_PATTERNS so navigateOwnTab
+ * can close the dead tab (rather than leak it) on the way out. */
+const PAGE_CRASH_PATTERNS = ['page crashed', 'target crashed']
+
+function matchesAny(message: string, patterns: string[]): boolean {
+  return patterns.some((pattern) => message.includes(pattern))
+}
+
+function isPageCrashError(err: unknown): boolean {
+  const message = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  return matchesAny(message, PAGE_CRASH_PATTERNS)
+}
+
 export function isBrowserConnectionError(err: unknown): boolean {
   const message = (err instanceof Error ? err.message : String(err)).toLowerCase()
-  return CONNECTION_DEAD_PATTERNS.some((pattern) => message.includes(pattern))
+  return matchesAny(message, CONNECTION_DEAD_PATTERNS) || matchesAny(message, PAGE_CRASH_PATTERNS)
 }
 
 /** True only for navigateOwnTab's own "the tab itself is gone" error (tab
@@ -155,6 +175,12 @@ export async function navigateOwnTab(browser: AgentBrowser, cdpUrl: string, tab:
   }
   const result = await browser.goto({ url })
   if (!result.success) {
+    // A crashed renderer can't be navigated again and can't be reused — close
+    // it so it isn't leaked, then let the caller's isBrowserConnectionError
+    // path replace this owned tab (and, if that fails too, relaunch the whole
+    // browser — see acquire*Tab). Without this the cached tab stayed crashed
+    // forever and every later job failed permanently.
+    if (isPageCrashError(result.message)) await closeOwnTab(browser, tab)
     throw new Error(`Failed to navigate owned tab to ${url}: ${result.message}`)
   }
   await bringTabToFront(cdpUrl, matchFragment)

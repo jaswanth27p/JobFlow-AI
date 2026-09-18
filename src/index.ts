@@ -5,7 +5,7 @@ import { loadResume, loadProfile } from './profile/loader.ts'
 import { getDb, closeDb } from './db/index.ts'
 import { launchBootstrapBrowser, openLoginTabs, shutdownBrowserServer } from './browser/session.ts'
 import { shutdownEasyApplyBrowser } from './browser/easy-apply-session.ts'
-import { shutdownJudgeBrowser } from './browser/judge-session.ts'
+import { shutdownScrapeBrowser } from './browser/scrape-session.ts'
 import { startLoginAutoVerify, stopLoginAutoVerify } from './browser/verify-login.ts'
 import { initAppState } from './state/app-state.ts'
 import { registerBuiltinCommands } from './commands/index.ts'
@@ -14,8 +14,10 @@ import { stopAutoModeAndWait } from './agents/search-scheduler.ts'
 import { stopCareerCheckAndWait } from './agents/career-scan-agent.ts'
 import { stopEasyApplyWorker } from './queues/easy-apply-worker.ts'
 import { stopJudgeWorker } from './queues/judge-worker.ts'
+import { stopScrapeWorker } from './queues/scrape-worker.ts'
 import { closeApplyQueues, getApplyQueueCounts } from './queues/apply-queues.ts'
 import { closeJudgeQueues } from './queues/judge-queues.ts'
+import { closeScrapeQueues } from './queues/scrape-queues.ts'
 import { startDashboard, stopDashboard } from './dashboard/server.ts'
 import { startSummaryScheduler, stopSummaryScheduler } from './notify/summary-aggregator.ts'
 import { mountTui, destroyTui } from './tui/index.tsx'
@@ -49,24 +51,26 @@ async function cleanup() {
   // (it's driving the browser directly, no queue to gate it), then the queue
   // workers (their open Redis connections keep the process alive indefinitely
   // otherwise), and only once nothing is using the browser anymore do we kill
-  // it. easy-apply and judge are independent queues on independent dedicated
-  // browsers — stopped in PARALLEL, not sequentially: each worker's stop
-  // request also aborts its own in-flight job (see stopEasyApplyWorker/
-  // stopJudgeWorker), but requesting them one after another meant the second
-  // worker kept pulling and finishing MORE jobs off its queue for however
-  // long the first worker's stop took to resolve — looking exactly like "it
-  // keeps going until the queue is empty" from the outside.
+  // it. easy-apply, scrape, and judge are independent queues — stopped in
+  // PARALLEL, not sequentially: each worker's stop request also aborts its own
+  // in-flight job (see stopEasyApplyWorker/stopScrapeWorker/stopJudgeWorker),
+  // but requesting them one after another meant the later worker kept pulling
+  // and finishing MORE jobs off its queue for however long the first worker's
+  // stop took to resolve — looking exactly like "it keeps going until the
+  // queue is empty" from the outside.
   await stopAutoModeAndWait()
   await stopSearchAndWait()
   await stopCareerCheckAndWait()
-  await Promise.all([stopEasyApplyWorker(), stopJudgeWorker()])
+  await Promise.all([stopEasyApplyWorker(), stopScrapeWorker(), stopJudgeWorker()])
   await closeApplyQueues()
   await closeJudgeQueues()
-  // easy-apply's and the judge worker's own dedicated browsers (see
-  // easy-apply-session.ts / judge-session.ts) — both no-ops if never launched
-  // this session (lazy, only on first use of each).
+  await closeScrapeQueues()
+  // easy-apply's and the scrape worker's own dedicated browsers (see
+  // easy-apply-session.ts / scrape-session.ts) — both no-ops if never
+  // launched this session (lazy, only on first use of each). The judge
+  // worker has no browser of its own — LLM-only, see judge-worker.ts.
   await shutdownEasyApplyBrowser()
-  await shutdownJudgeBrowser()
+  await shutdownScrapeBrowser()
   await shutdownBrowserServer()
   await closeDb()
 }

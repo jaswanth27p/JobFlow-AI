@@ -26,6 +26,13 @@ mock.module('../../../src/queues/judge-queues.ts', () => ({
   enqueueJudgeJob: async (jobId: string, sourceUrl: string) => {
     enqueueJudgeCalls.push({ jobId, sourceUrl })
   },
+  // Bun's mock.module is process-global and leaks into later test files, so
+  // this stub must cover every export of judge-queues.ts — judge-commands.ts
+  // imports getJudgeQueueCounts from it, and a mock with only enqueueJudgeJob
+  // made that import throw "Export named 'getJudgeQueueCounts' not found"
+  // when the full suite ran (isolated runs passed).
+  getJudgeQueueCounts: async () => ({ waiting: 0, active: 0 }),
+  closeJudgeQueues: async () => {},
 }))
 
 beforeEach(() => {

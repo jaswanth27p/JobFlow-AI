@@ -34,7 +34,11 @@ process.on('uncaughtException', (err) => {
 })
 
 const PROFILE_PREFIX = 'linkedin-auto-'
-const userDataDir = join(tmpdir(), `${PROFILE_PREFIX}${Date.now()}`)
+// pid + random suffix, not just Date.now(): multiple browser-server processes
+// (bootstrap, easy-apply, scrape) can launch within the same millisecond, and
+// a shared userDataDir makes Chrome refuse to start ("profile is already in
+// use").
+const userDataDir = join(tmpdir(), `${PROFILE_PREFIX}${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
 process.stderr.write(`[browser-server] userDataDir: ${userDataDir}\n`)
 
 // Each launch uses a fresh temp profile dir; login is persisted separately via

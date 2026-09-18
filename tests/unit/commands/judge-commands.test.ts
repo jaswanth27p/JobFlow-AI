@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
+import { describe, test, expect, beforeEach, mock } from 'bun:test'
 import { clearRegistryForTest, getCommand } from '../../../src/commands/registry.ts'
 import { initAppState, appState } from '../../../src/state/app-state.ts'
 
@@ -6,47 +6,37 @@ const calls: string[] = []
 let scrapeRunning = false
 let judgeRunning = false
 
+// These mocks are process-global (Bun's mock.module has no per-file scope), so
+// each one covers EVERY export of its module. A partial mock omitting an export
+// that a later import needs throws "Export named X not found" — including from
+// a fresh scrape-worker import, whose bare judge-queues dependency would then
+// resolve to a partial judge-queues mock. Complete stubs make that impossible.
 mock.module('../../../src/queues/scrape-worker.ts', () => ({
   startScrapeWorker: () => { calls.push('startScrape'); scrapeRunning = true },
   stopScrapeWorker: async () => { calls.push('stopScrape'); scrapeRunning = false },
   isScrapeWorkerRunning: () => scrapeRunning,
+  processScrapeJob: async () => {},
 }))
 mock.module('../../../src/queues/judge-worker.ts', () => ({
   startJudgeWorker: () => { calls.push('startJudge'); judgeRunning = true },
   stopJudgeWorker: async () => { calls.push('stopJudge'); judgeRunning = false },
   isJudgeWorkerRunning: () => judgeRunning,
+  processJudgeJob: async () => {},
+  recordJudgeVerdict: async () => {},
 }))
 mock.module('../../../src/queues/scrape-queues.ts', () => ({
   getScrapeQueueCounts: async () => ({ waiting: 0, active: 0 }),
+  enqueueScrapeJob: async () => {},
+  closeScrapeQueues: async () => {},
 }))
 mock.module('../../../src/queues/judge-queues.ts', () => ({
   getJudgeQueueCounts: async () => ({ waiting: 0, active: 0 }),
+  enqueueJudgeJob: async () => {},
+  closeJudgeQueues: async () => {},
 }))
 
 const specifier = '../../../src/commands/judge-commands.ts?__judge_commands_test'
 const { registerJudgeCommands } = await import(specifier)
-
-// Bun's mock.module is process-global, so these partial mocks would otherwise
-// leak into every later test file (a partial mock omitting an export later
-// imported throws "Export named X not found"). Restore the real modules once
-// this file is done, matching judge-worker.test.ts's afterAll pattern.
-afterAll(async () => {
-  const scrapeWorkerSpecifier = '../../../src/queues/scrape-worker.ts?__restore_judge_commands_test'
-  const scrapeWorkerReal = await import(scrapeWorkerSpecifier)
-  mock.module('../../../src/queues/scrape-worker.ts', () => ({ ...scrapeWorkerReal }))
-
-  const judgeWorkerSpecifier = '../../../src/queues/judge-worker.ts?__restore_judge_commands_test'
-  const judgeWorkerReal = await import(judgeWorkerSpecifier)
-  mock.module('../../../src/queues/judge-worker.ts', () => ({ ...judgeWorkerReal }))
-
-  const scrapeQueuesSpecifier = '../../../src/queues/scrape-queues.ts?__restore_judge_commands_test'
-  const scrapeQueuesReal = await import(scrapeQueuesSpecifier)
-  mock.module('../../../src/queues/scrape-queues.ts', () => ({ ...scrapeQueuesReal }))
-
-  const judgeQueuesSpecifier = '../../../src/queues/judge-queues.ts?__restore_judge_commands_test'
-  const judgeQueuesReal = await import(judgeQueuesSpecifier)
-  mock.module('../../../src/queues/judge-queues.ts', () => ({ ...judgeQueuesReal }))
-})
 
 beforeEach(() => {
   clearRegistryForTest()

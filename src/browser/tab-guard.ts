@@ -112,10 +112,38 @@ async function findOwnTab(browser: AgentBrowser, tab: OwnedTab): Promise<TabList
   return tabs.find((t) => t.url.includes(tab.matchFragment))
 }
 
+/** Best-effort cleanup for the tab `browser_tabs` action "new" leaves behind
+ * when its built-in navigation fails. That action's implementation is
+ * `newTab()` followed by `page.goto(url)`; if the goto throws (e.g. LinkedIn
+ * answering with an HTTP error status under load, `net::ERR_HTTP_RESPONSE_CODE_FAILURE`)
+ * the tab is NOT rolled back, but the tool still returns `success: false`.
+ * The caller then throws without ever receiving an OwnedTab, so nothing can
+ * close it — every retry of the same failing open leaks one more tab into the
+ * same window, unbounded. Closing the tab whose creation pushed the count
+ * past `beforeCount` is what keeps a browser window at a single tab. */
+async function closeTabLeakedByFailedOpen(browser: AgentBrowser, beforeCount: number): Promise<void> {
+  try {
+    const after = await browser.tabs({ action: 'list' })
+    if (!after.success) return
+    const tabs = (after.tabs ?? []) as TabListEntry[]
+    if (tabs.length <= beforeCount) return
+    // newTab() appends, so the tab our failed open created is the last one.
+    const leaked = tabs[tabs.length - 1]
+    if (leaked) await browser.tabs({ action: 'close', index: leaked.index })
+  } catch {
+    // Best-effort — never mask the original open failure.
+  }
+}
+
 export async function openOwnTab(browser: AgentBrowser, cdpUrl: string, url: string, matchFragment: string): Promise<OwnedTab> {
   await browser.ensureReady()
+  // Count the tabs first so a failed open can be cleaned up — see
+  // closeTabLeakedByFailedOpen.
+  const before = await browser.tabs({ action: 'list' })
+  const beforeCount = before.success ? (before.tabs ?? []).length : 0
   const result = await browser.tabs({ action: 'new', url })
   if (!result.success) {
+    await closeTabLeakedByFailedOpen(browser, beforeCount)
     throw new Error(`Failed to open dedicated tab for ${url}: ${result.message}`)
   }
   // browser.tabs() above only updates agent-browser's own bookkeeping — it
@@ -124,6 +152,27 @@ export async function openOwnTab(browser: AgentBrowser, cdpUrl: string, url: str
   // currently frontmost.
   await bringTabToFront(cdpUrl, matchFragment)
   return { matchFragment }
+}
+
+/** Closes every tab in `browser` whose URL does not contain `keepFragment`.
+ * For a browser dedicated to one agent (scrape/easy-apply) this keeps the
+ * window at exactly the one tab it's actively using, so stray tabs left
+ * behind by a redirect that took an earlier owned tab off its matchFragment
+ * never accumulate across jobs. Closed highest-index-first so each removal
+ * doesn't shift the index of a not-yet-closed tab. Best-effort. */
+export async function closeStrayTabs(browser: AgentBrowser, keepFragment: string): Promise<void> {
+  try {
+    const list = await browser.tabs({ action: 'list' })
+    if (!list.success) return
+    const strays = ((list.tabs ?? []) as TabListEntry[])
+      .filter((t) => !t.url.includes(keepFragment))
+      .sort((a, b) => b.index - a.index)
+    for (const tab of strays) {
+      await browser.tabs({ action: 'close', index: tab.index })
+    }
+  } catch {
+    // Best-effort — never let cleanup break the automation step it's supporting.
+  }
 }
 
 /** Call before every agent step (onStepFinish) so a hijacked active-tab

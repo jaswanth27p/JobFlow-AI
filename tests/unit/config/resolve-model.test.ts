@@ -36,6 +36,6 @@ describe('resolveModel', () => {
 
   test('the fallback passed in wins over config.model when they differ (live /set override)', () => {
     const config = makeConfig({})
-    expect(resolveModel(config, 'live-set-model', 'career')).toBe('live-set-model')
+    expect(resolveModel(config, 'live-set-model', 'judge')).toBe('live-set-model')
   })
 })

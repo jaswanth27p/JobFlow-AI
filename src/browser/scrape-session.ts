@@ -8,7 +8,7 @@ import { browserServerUrl as bootstrapServerUrl, getBrowserServerPort as getBoot
 /**
  * A THIRD, fully independent Chrome process dedicated to the scrape-queue
  * worker — separate from both the bootstrap browser (session.ts, shared by
- * search/career-scan) and the easy-apply browser (easy-apply-session.ts).
+ * the search agent) and the easy-apply browser (easy-apply-session.ts).
  * There is deliberately only ONE of these, ever: the scrape worker opens/
  * navigates one job's detail-page tab at a time, serially (see
  * scrape-worker.ts and the design doc's Problem section for why running this

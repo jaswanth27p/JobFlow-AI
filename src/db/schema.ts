@@ -9,8 +9,8 @@ export const jobs = pgTable('jobs', {
   applyType: text('apply_type', { enum: ['easy', 'external'] }).notNull(),
   sourceUrl: text('source_url').notNull(),
   /** Which agent discovered this job — drives the dashboard's Source column and
-   * the /career-pages stats route. Defaults to 'linkedin' since every row before
-   * this column existed came from the LinkedIn search agent. */
+   * the dashboard's job-source filter. Defaults to 'linkedin' since every row
+   * before this column existed came from the LinkedIn search agent. */
   source: text('source', { enum: ['linkedin', 'career_page'] }).notNull().default('linkedin'),
   status: text('status', {
     enum: ['discovered', 'queued', 'external_saved', 'needs_input', 'applied', 'failed', 'skipped'],
@@ -90,24 +90,3 @@ export const searchRuns = pgTable('search_runs', {
   skippedCount: integer('skipped_count').notNull().default(0),
 })
 
-/** External (non-LinkedIn) company career/jobs pages the user tracks manually,
- * re-scanned in full on every /check-careers run — see careerPageScans below. */
-export const careerPages = pgTable('career_pages', {
-  id: text('id').primaryKey(),
-  url: text('url').notNull().unique(),
-  label: text('label').notNull(),
-  addedAt: timestamp('added_at').defaultNow(),
-  lastCheckedAt: timestamp('last_checked_at'),
-})
-
-/** One row per career page per /check-careers run — mirrors searchRuns, gives
- * per-page history of what a scan found. */
-export const careerPageScans = pgTable('career_page_scans', {
-  id: text('id').primaryKey(),
-  careerPageId: text('career_page_id').notNull().references(() => careerPages.id),
-  startedAt: timestamp('started_at').defaultNow(),
-  finishedAt: timestamp('finished_at'),
-  scannedCount: integer('scanned_count').notNull().default(0),
-  relevantCount: integer('relevant_count').notNull().default(0),
-  skippedCount: integer('skipped_count').notNull().default(0),
-})

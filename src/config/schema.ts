@@ -15,10 +15,10 @@ export const appConfigSchema = z.object({
       scanFullList: z.boolean().default(false),
     })),
   })).default([]),
-  /** Free text describing what to look for — consumed ONLY by the career-page
-   * scan agent (src/agents/career-scan-agent.ts). The LinkedIn search agent no
-   * longer judges relevance: a configured urlGroups entry is trusted as
-   * already-filtered by its own LinkedIn search params. */
+  /** Free text describing what to look for, fed to the per-job relevance
+   * judge (src/prompts/job-relevance-judge.prompt.ts). The LinkedIn search
+   * agent itself no longer judges relevance: a configured urlGroups entry is
+   * trusted as already-filtered by its own LinkedIn search params. */
   requirements: z.string().min(1),
   concurrency: z.number().positive().default(1),
   /** Parallel LLM relevance-judge calls (job-judge queue). No browser is
@@ -38,7 +38,6 @@ export const appConfigSchema = z.object({
   models: z.object({
     search: z.string().optional(),
     easyApply: z.string().optional(),
-    career: z.string().optional(),
     judge: z.string().optional(),
   }).default({}),
   notifySummaryIntervalMinutes: z.number().int().positive().default(30),

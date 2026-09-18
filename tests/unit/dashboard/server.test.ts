@@ -72,12 +72,6 @@ describe('dashboard handleRequest /api/*', () => {
     expect(Array.isArray(await res.json())).toBe(true)
   })
 
-  test('GET /api/career-pages returns an array', async () => {
-    const res = await handleRequest(new Request('http://localhost/api/career-pages'))
-    expect(res.status).toBe(200)
-    expect(Array.isArray(await res.json())).toBe(true)
-  })
-
   test('unknown /api route returns 404 JSON', async () => {
     const res = await handleRequest(new Request('http://localhost/api/nope'))
     expect(res.status).toBe(404)

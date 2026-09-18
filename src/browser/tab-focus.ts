@@ -22,7 +22,7 @@ import { getCurrentConfig } from '../config/current.ts'
  * problem tab-guard.ts otherwise guards against, so it can't make that
  * problem worse.
  *
- * Keyed by cdpUrl (not a single global) — search/career-scan and easy-apply
+ * Keyed by cdpUrl (not a single global) — the search agent and easy-apply
  * can each be talking to a DIFFERENT real browser process (see
  * easy-apply-session.ts), so a connection to one must never be used to look
  * for a tab that lives in the other.

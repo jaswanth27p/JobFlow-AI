@@ -7,16 +7,14 @@ import { browserServerUrl as bootstrapServerUrl, getBrowserServerPort as getBoot
 
 /**
  * A SECOND, fully independent Chrome process dedicated to the easy-apply
- * agent — separate from the bootstrap browser (session.ts) that search and
- * career-scan share. Search continuously opens/closes tabs while the
+ * agent — separate from the bootstrap browser (session.ts) that the search
+ * agent shares. Search continuously opens/closes tabs while the
  * easy-apply queue worker applies to jobs at the same time; sharing one
  * browser between them needed real tab-isolation machinery (tab-guard.ts,
  * tab-focus.ts) to stop one agent's tab-open from hijacking the other's
  * active tab or backgrounding it. A dedicated browser removes that
  * contention for this pair entirely — nothing else ever touches this
- * browser, so there's no other tab that could hijack it. (career-scan-agent
- * still shares the bootstrap browser with search; this only splits off
- * easy-apply.)
+ * browser, so there's no other tab that could hijack it.
  *
  * Logged into LinkedIn automatically by copying LIVE cookies from the
  * already-running bootstrap browser at the moment this browser launches

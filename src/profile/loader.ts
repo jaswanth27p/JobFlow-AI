@@ -26,7 +26,7 @@ export function withoutPhone<T extends { contact: { phone: string } }>(
 }
 
 // Serializes read-modify-write cycles against profile.json. Multiple agents
-// (search/easy-apply/career-scan) plus the dashboard's HTTP handlers all run
+// (search/easy-apply) plus the dashboard's HTTP handlers all run
 // in this one process and can call saveLearnedAnswer around the same time —
 // without this chain, two concurrent calls each read the file before either
 // writes, and the second write silently clobbers the first's learned answer.

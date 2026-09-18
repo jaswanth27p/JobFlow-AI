@@ -34,7 +34,7 @@ let sharedBrowserCdpUrl: string | null = null
 
 /** Launches (on first call) or reuses easy-apply's own dedicated browser —
  * see easy-apply-session.ts for why this is a separate Chrome process rather
- * than sharing the bootstrap browser with search/career-scan. Async because
+ * than sharing the bootstrap browser with the search agent. Async because
  * that launch is async; returns the cdpUrl alongside the AgentBrowser since
  * tab-guard.ts's reclaim/open calls need it (to bring the right browser's tab
  * to the front — see tab-focus.ts). */

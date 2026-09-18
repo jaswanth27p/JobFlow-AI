@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { MastraModelConfig } from '@mastra/core/llm'
 import type { AppConfig } from './schema.ts'
 
-export type AgentKind = 'search' | 'easyApply' | 'career' | 'judge'
+export type AgentKind = 'search' | 'easyApply' | 'judge'
 
 // OpenCode Go rejects requests that don't identify their client: coding-agent
 // CLIs send their own User-Agent plus a stable per-conversation

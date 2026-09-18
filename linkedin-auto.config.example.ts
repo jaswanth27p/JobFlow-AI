@@ -15,9 +15,8 @@ export default {
       ],
     },
   ],
-  // Free text. Used ONLY by the career-page scan agent (/add-career-url +
-  // /check-careers) to judge relevance — an arbitrary careers page has no
-  // equivalent of LinkedIn's own search filters.
+  // Free text. Fed to the per-job relevance judge (the LinkedIn search agent
+  // trusts its own search filters and does not judge).
   requirements: `
     Look for backend / full-stack engineering roles.
     Prefer remote or hybrid.

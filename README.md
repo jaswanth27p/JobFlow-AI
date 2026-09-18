@@ -9,13 +9,12 @@ It does **not** store or ask for your LinkedIn password. You log in by hand, onc
 - **Search** — runs the LinkedIn search-result URLs you configure (`mustCheckUrls`), once or on a loop/interval. Every new job it finds gets recorded and routed: no relevance judgment against your resume/requirements for LinkedIn, since your search URL's own filters (keywords, location, date posted) are trusted as the relevance signal.
 - **Easy Apply** — works through LinkedIn's own "Easy Apply" queue, filling out the multi-step form for each job.
 - **External jobs — saved, not automated** — a job that hands off to the company's own site is saved to the database with its apply link and you get a desktop notification. There's no automated apply flow for external sites: every company's apply form is different enough that scripted automation there breaks constantly, so this app doesn't attempt it.
-- **Career pages — separate, still judged** — company career pages you track with `/add-career-url` are scanned by a second agent that DOES judge relevance against your resume/profile/requirements (since, unlike LinkedIn, an arbitrary careers page has no equivalent of LinkedIn's own search filters). A relevant posting is saved and notified the same way an external LinkedIn job is — never auto-applied.
 - **Learns as it goes** — the first time it hits a question it can't answer on its own, it asks you once, then remembers the answer (`profile.json`) so it's never asked again.
 - **Never applies blind** — every Easy Apply application goes into a Postgres table with a status and a screenshot, so you have a record of what was actually submitted.
 
 ## How it works (short version)
 
-One Bun process runs everything: a terminal UI (four tabs — Search / Easy Apply / External Jobs / Career Pages), a background browser it drives via [Playwright](https://playwright.dev/) over Chrome DevTools Protocol, and three [Mastra](https://mastra.ai/) AI agents (LinkedIn search, career-page scan, easy-apply) that each get their own set of tools (navigate, click, type, plus a handful of app-specific ones) and figure out the actual steps themselves — they're not scripted click-sequences, so they adapt to whatever a given job posting or apply form actually looks like. Job/application records live in Postgres; the queue between "found an Easy Apply job" and "applied to it" is BullMQ/Redis. External jobs (from either agent) skip the queue entirely — they're saved with their apply link and you get a desktop notification instead.
+One Bun process runs everything: a terminal UI (four tabs — Search / Easy Apply / Scrape / Judge Queue), a background browser it drives via [Playwright](https://playwright.dev/) over Chrome DevTools Protocol, and two [Mastra](https://mastra.ai/) AI agents (career-scan removed; the LinkedIn search path is deterministic and the easy-apply agent fills forms) that each get their own set of tools (navigate, click, type, plus a handful of app-specific ones) and figure out the actual steps themselves — they're not scripted click-sequences, so they adapt to whatever a given job posting or apply form actually looks like. Job/application records live in Postgres; the queue between "found an Easy Apply job" and "applied to it" is BullMQ/Redis. External jobs (from either agent) skip the queue entirely — they're saved with their apply link and you get a desktop notification instead.
 
 For the full technical design (and where the real implementation differs from the original plan), see [`docs/superpowers/specs/2026-07-14-tui-rebuild-design.md`](docs/superpowers/specs/2026-07-14-tui-rebuild-design.md). For codebase-level orientation, see [`CLAUDE.md`](CLAUDE.md).
 
@@ -111,10 +110,10 @@ export default {
       ],
     },
   ],
-  requirements: `                     // Free text — used ONLY by the career-page scan agent
-    Look for senior backend / full-stack engineering roles.  // (/add-career-url + /check-careers). LinkedIn search
-    Prefer remote or hybrid in the US.                        // no longer judges relevance — urlGroups' own
-    Avoid roles requiring more than 8 years of experience.    // LinkedIn filters are trusted for that.
+  requirements: `                     // Free text — fed to the per-job relevance judge
+    Look for senior backend / full-stack engineering roles.  // (search results are trusted as already filtered)
+    Prefer remote or hybrid in the US.
+    Avoid roles requiring more than 8 years of experience.
   `,
   concurrency: 1,                     // Reserved for future use; the easy-apply worker always runs at concurrency 1.
   judgeConcurrency: 10,               // Parallel LLM relevance-judge calls (1-10, default 10) — no browser
@@ -172,16 +171,16 @@ Free text — your resume, in Markdown or plain text. Used as LLM context for re
 
 `model` and each entry in `models` are `'provider/model'` strings resolved by Mastra's model router against your `OPENCODE_API_KEY`. This project defaults every agent to **`opencode-go/deepseek-v4-flash`** — fast, cheap, and sufficient since none of the agents need image/vision understanding (they read pages as structured accessibility snapshots, not screenshots). If you need a vision-capable model for some reason, `opencode-go/mimo-v2.5` is available from the same provider.
 
-Four agent kinds can be overridden independently via `models`: `search` (the LinkedIn navigator), `judge` (per-job relevance judging), `career` (career-page scanning), and `easyApply` (Easy Apply form-filling). Any kind left unset falls back to the top-level `model`. A common reason to override: `easyApply` involves actually filling out forms and answering free-text questions, so it's worth pointing at a stronger model even if you keep the rest on the cheap default.
+Three agent kinds can be overridden independently via `models`: `search`, `judge`, and `easyApply`. Any kind left unset falls back to the top-level `model`. A common reason to override: `easyApply` involves actually filling out forms and answering free-text questions, so it's worth pointing at a stronger model even if you keep the rest on the cheap default.
 
 ## Usage
 
-Once `/verify-login` succeeds, every command below is available. Commands are scoped to a tab — `Tab`/`Shift+Tab` cycles between Search / Easy Apply / External Jobs / Career Pages, or jump directly with `/tab <name>`.
+Once `/verify-login` succeeds, every command below is available. Commands are scoped to a tab — `Tab`/`Shift+Tab` cycles between Search / Easy Apply / Scrape / Judge Queue, or jump directly with `/tab <name>`.
 
 | Command | Tab | What it does |
 |---|---|---|
 | `/verify-login` | global | Check LinkedIn/Gmail login status; unlocks the app once LinkedIn passes |
-| `/tab [search\|easy\|external\|careers]` | global | Switch the active tab (no arg opens a picker) |
+| `/tab [search\|easy\|scrape\|judge]` | global | Switch the active tab (no arg opens a picker) |
 | `/theme [name]` | global | Switch color theme (no arg opens a picker) |
 | `/set <setting> <value>` | global | Change a runtime setting (`concurrency`, `judgeConcurrency`, `model`, `minNavDelayMs`, `maxNavDelayMs`, `loopCooldownMs`) without restarting |
 | `/reload-config` | global | Re-read `linkedin-auto.config.ts` (url groups, per-agent models, prompts, requirements) without restarting |
@@ -193,11 +192,8 @@ Once `/verify-login` succeeds, every command below is available. Commands are sc
 | `/auto-off` | search | Stop the auto-mode loop/interval |
 | `/process-easy-queue` | easy | Start working through queued Easy Apply jobs |
 | `/stop-easy-queue` | easy | Stop the Easy Apply worker |
-| `/add-career-url <url> [label]` | careers | Track an external company careers page |
-| `/check-careers` | careers | Re-scan every tracked career page for new relevant postings (still resume/requirements-judged) |
-| `/stop-careers` | careers | Stop an in-progress career-page check |
 
-**External jobs (from LinkedIn or a career page)** are never auto-applied — they're saved to the database with their apply link, and you get a desktop notification (title, company, and the link). Check them anytime at `http://127.0.0.1:4870/external-jobs`, or in the External Jobs tab in the TUI.
+**External jobs (from LinkedIn)** are never auto-applied — they're saved to the database with their apply link, and you get a desktop notification (title, company, and the link). Check them anytime at `http://127.0.0.1:4870/external-jobs`, or in the External Jobs tab in the TUI.
 
 A small review dashboard also runs at `http://127.0.0.1:4870` (loopback only; port via `DASHBOARD_PORT`) — today's stats, Easy Apply application history, external jobs found, and a review page where you can mark recorded answers correct/wrong (corrections feed back into `profile.json`).
 

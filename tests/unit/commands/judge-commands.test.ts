@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
 import { clearRegistryForTest, getCommand } from '../../../src/commands/registry.ts'
-import { initAppState } from '../../../src/state/app-state.ts'
+import { initAppState, appState } from '../../../src/state/app-state.ts'
 
 const calls: string[] = []
 let scrapeRunning = false
@@ -82,5 +82,14 @@ describe('/stop-judge-queue', () => {
     await getCommand('stop-judge-queue')!.run({ args: [], rawArgs: '' })
     expect(calls).not.toContain('stopScrape')
     expect(calls).not.toContain('stopJudge')
+  })
+})
+
+describe('updateCombinedStatus', () => {
+  test('writes scrape depth to the scrape tab and judge depth to the judge tab', async () => {
+    const { updateCombinedStatus } = await import(specifier)
+    await updateCombinedStatus()
+    expect(appState.tabs.scrape.step).toContain('scrape:')
+    expect(appState.tabs.judge.step).toContain('judge:')
   })
 })

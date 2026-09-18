@@ -13,8 +13,8 @@ function initialState(settings: Settings): AppState {
     tabs: {
       search: emptyTabState(),
       easy: emptyTabState(),
+      scrape: emptyTabState(),
       judge: emptyTabState(),
-      careers: emptyTabState(),
     },
     settings,
   }

@@ -1,4 +1,4 @@
-export type TabId = 'search' | 'easy' | 'judge' | 'careers'
+export type TabId = 'search' | 'easy' | 'scrape' | 'judge'
 export type AgentStatus = 'idle' | 'running' | 'needs_input'
 
 export interface TabState {
@@ -33,6 +33,6 @@ export interface AppState {
   settings: Settings
 }
 
-export const TAB_IDS: TabId[] = ['search', 'easy', 'judge', 'careers']
+export const TAB_IDS: TabId[] = ['search', 'easy', 'scrape', 'judge']
 
 export const MAX_LOGS_PER_TAB = 500

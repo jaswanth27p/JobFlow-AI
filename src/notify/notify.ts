@@ -18,8 +18,8 @@ export interface BuiltNotification {
 const TAB_LABELS: Record<TabId, string> = {
   search: 'Search',
   easy: 'Easy Apply',
+  scrape: 'Scrape',
   judge: 'Judge Queue',
-  careers: 'Career Pages',
 }
 
 /** Pure — shapes the title/message/click-target for each event kind. No I/O,

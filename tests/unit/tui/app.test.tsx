@@ -50,7 +50,7 @@ describe('App', () => {
     expect(setup.captureCharFrame()).toContain('Type / for commands')
   })
 
-  test('pressing Tab cycles activeTab search -> easy -> judge -> careers -> search', async () => {
+  test('pressing Tab cycles activeTab search -> easy -> scrape -> judge -> search', async () => {
     const setup = await testRender(() => <App />, { width: 100, height: 30 })
     await setup.renderOnce()
     expect(appState.activeTab).toBe('search')
@@ -61,11 +61,11 @@ describe('App', () => {
 
     setup.mockInput.pressTab()
     await setup.renderOnce()
-    expect(appState.activeTab).toBe('judge')
+    expect(appState.activeTab).toBe('scrape')
 
     setup.mockInput.pressTab()
     await setup.renderOnce()
-    expect(appState.activeTab).toBe('careers')
+    expect(appState.activeTab).toBe('judge')
 
     setup.mockInput.pressTab()
     await setup.renderOnce()
@@ -77,7 +77,7 @@ describe('App', () => {
     await setup.renderOnce()
     setup.mockInput.pressTab({ shift: true })
     await setup.renderOnce()
-    expect(appState.activeTab).toBe('careers')
+    expect(appState.activeTab).toBe('judge')
   })
 
   test('narrow resize wraps sidebar text instead of clipping it', async () => {

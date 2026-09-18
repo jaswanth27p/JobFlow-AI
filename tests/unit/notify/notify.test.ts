@@ -23,7 +23,7 @@ describe('buildNotification', () => {
 
   test('needs-input uses the right label per tab', () => {
     expect(buildNotification({ kind: 'needs-input', tab: 'search', question: 'q' }).title).toBe('Search needs your input')
-    expect(buildNotification({ kind: 'needs-input', tab: 'careers', question: 'q' }).title).toBe('Career Pages needs your input')
+    expect(buildNotification({ kind: 'needs-input', tab: 'scrape', question: 'q' }).title).toBe('Scrape needs your input')
   })
 
   test('easy-apply-result success', () => {

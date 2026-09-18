@@ -10,14 +10,15 @@ const STATUS_REFRESH_MS = 2000
 
 let statusInterval: ReturnType<typeof setInterval> | null = null
 
-/** Refreshes the sidebar with both stages' queue depth in one line — a single
- * interval spanning both workers, rather than each writing its own status,
- * so the two don't fight over the sidebar string. Best-effort: a transient
- * Redis hiccup just skips a refresh. */
-async function updateCombinedStatus(): Promise<void> {
+/** Refreshes each stage's sidebar line with its own queue depth — one interval
+ * spanning both workers, but two separate status writes so the scrape and
+ * judge tabs never fight over the same line. Best-effort: a transient Redis
+ * hiccup just skips a refresh. Exported for direct unit testing. */
+export async function updateCombinedStatus(): Promise<void> {
   try {
     const [scrape, judge] = await Promise.all([getScrapeQueueCounts(), getJudgeQueueCounts()])
-    setAgentStatus(JUDGE_TAB, 'running', `scrape: ${scrape.waiting} left, judge: ${judge.waiting} left, ${judge.active} judging`)
+    setAgentStatus('scrape', 'running', `scrape: ${scrape.waiting} waiting, ${scrape.active} fetching`)
+    setAgentStatus(JUDGE_TAB, 'running', `judge: ${judge.waiting} waiting, ${judge.active} judging`)
   } catch {
     // Cosmetic only — ignore.
   }

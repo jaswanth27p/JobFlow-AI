@@ -14,7 +14,7 @@ import { summarizeError } from '../utils/error-summary.ts'
 import { logger } from '../utils/logger.ts'
 import type { TabId } from '../state/types.ts'
 
-const JUDGE_TAB: TabId = 'judge'
+const SCRAPE_TAB: TabId = 'scrape'
 
 /** How long to wait after opening a job's detail-page tab before the first
  * snapshot attempt — there's no LLM driving this navigation to decide when
@@ -133,7 +133,7 @@ async function readJobText(jobId: string, browser: AgentBrowser, cdpUrl: string,
   } catch (err) {
     if (isBrowserConnectionError(err)) resetScrapeBrowser(cdpUrl)
     logger.error({ err, jobId }, 'scrape: failed to read job detail pane')
-    pushLog(JUDGE_TAB, `Could not load job ${jobId} — will retry. (${summarizeError(err)})`)
+    pushLog(SCRAPE_TAB, `Could not load job ${jobId} — will retry. (${summarizeError(err)})`)
     return ''
   }
   return jobText
@@ -155,7 +155,7 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
     return
   }
 
-  if ((await waitForNetwork(JUDGE_TAB, signal)) === 'aborted') return
+  if ((await waitForNetwork(SCRAPE_TAB, signal)) === 'aborted') return
 
   const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
 
@@ -165,7 +165,7 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
     ;({ browser, cdpUrl } = await acquireScrapeTab(jobId, applyUrl))
   } catch (err) {
     logger.error({ err, jobId }, 'scrape: failed to open job tab')
-    pushLog(JUDGE_TAB, `Could not open job ${jobId} — will retry. (${summarizeError(err)})`)
+    pushLog(SCRAPE_TAB, `Could not open job ${jobId} — will retry. (${summarizeError(err)})`)
     throw err
   }
 
@@ -209,14 +209,14 @@ export function startScrapeWorker(): void {
   )
 
   worker.on('failed', (_job, err) => {
-    pushLog(JUDGE_TAB, `Scrape worker error: ${err.message}`)
+    pushLog(SCRAPE_TAB, `Scrape worker error: ${err.message}`)
   })
   worker.on('error', (err) => {
-    pushLog(JUDGE_TAB, `Scrape worker connection error: ${err.message}`)
+    pushLog(SCRAPE_TAB, `Scrape worker connection error: ${err.message}`)
   })
 
-  pushLog(JUDGE_TAB, 'Scrape queue worker started.')
-  setAgentStatus(JUDGE_TAB, 'running', 'waiting for jobs')
+  pushLog(SCRAPE_TAB, 'Scrape queue worker started.')
+  setAgentStatus(SCRAPE_TAB, 'running', 'waiting for jobs')
 }
 
 export async function stopScrapeWorker(): Promise<void> {
@@ -224,5 +224,5 @@ export async function stopScrapeWorker(): Promise<void> {
   currentJobAbort?.abort()
   await worker.close()
   worker = null
-  pushLog(JUDGE_TAB, 'Scrape queue worker stopped.')
+  pushLog(SCRAPE_TAB, 'Scrape queue worker stopped.')
 }

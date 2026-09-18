@@ -4,6 +4,7 @@ import { noopLogger } from '@mastra/core/logger'
 import { AgentBrowser } from '@mastra/agent-browser'
 import { getRedisConnectionOptions } from './connection.ts'
 import { enqueueJudgeJob } from './judge-queues.ts'
+import { getScrapeQueueCounts } from './scrape-queues.ts'
 import { getScrapeCdpUrl, invalidateScrapeCdpUrl } from '../browser/scrape-session.ts'
 import { openOwnTab, navigateOwnTab, closeStrayTabs, isBrowserConnectionError, isOwnedTabGoneError, type OwnedTab } from '../browser/tab-guard.ts'
 import { waitForNetwork } from '../utils/network.ts'
@@ -180,7 +181,16 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
 
   const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
   pushLog(SCRAPE_TAB, `Fetching job ${jobId}…`)
-  setAgentStatus(SCRAPE_TAB, 'running', `fetching job ${jobId}`)
+  // Include the live queue depth in the per-job status: this write would
+  // otherwise clobber updateCombinedStatus's count line (they race on the
+  // same tab), leaving the sidebar showing only the current id with no sense
+  // of how much work is left.
+  const counts = await getScrapeQueueCounts()
+  setAgentStatus(
+    SCRAPE_TAB,
+    'running',
+    `${counts.waiting} waiting (fetching ${jobId})`,
+  )
 
   let browser: AgentBrowser
   let cdpUrl: string
@@ -240,7 +250,10 @@ export function startScrapeWorker(): void {
   })
 
   pushLog(SCRAPE_TAB, 'Scrape queue worker started.')
-  setAgentStatus(SCRAPE_TAB, 'running', 'waiting for jobs')
+  setAgentStatus(SCRAPE_TAB, 'running', 'starting…')
+  void getScrapeQueueCounts()
+    .then((c) => setAgentStatus(SCRAPE_TAB, 'running', `idle — ${c.waiting} waiting in queue`))
+    .catch(() => setAgentStatus(SCRAPE_TAB, 'running', 'waiting for jobs'))
 }
 
 export async function stopScrapeWorker(): Promise<void> {

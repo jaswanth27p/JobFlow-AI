@@ -1,6 +1,7 @@
 import { Worker, type Job } from 'bullmq'
 import { eq } from 'drizzle-orm'
 import { enqueueApplyJob } from './apply-queues.ts'
+import { getJudgeQueueCounts } from './judge-queues.ts'
 import { getRedisConnectionOptions } from './connection.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, jobContents } from '../db/schema.ts'
@@ -112,7 +113,11 @@ export async function processJudgeJob(jobId: string, sourceUrl: string, signal?:
 
   const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
   pushLog(JUDGE_TAB, `Judging job ${jobId}… (${content.length} chars)`)
-  setAgentStatus(JUDGE_TAB, 'running', `judging job ${jobId}`)
+  // Carry the live queue depth in the per-job line — otherwise this write
+  // clobbers updateCombinedStatus's count on the same tab and the sidebar
+  // shows only the current id with no idea how much is left.
+  const counts = await getJudgeQueueCounts().catch(() => ({ waiting: 0, active: 0 }))
+  setAgentStatus(JUDGE_TAB, 'running', `${counts.waiting} waiting (judging ${jobId})`)
 
   let verdict: Awaited<ReturnType<typeof judgeJob>>
   try {
@@ -175,7 +180,10 @@ export function startJudgeWorker(n: number = appState.settings.judgeConcurrency)
   })
 
   pushLog(JUDGE_TAB, `Judge queue worker started (concurrency ${Math.max(1, Math.floor(n))}).`)
-  setAgentStatus(JUDGE_TAB, 'running', 'waiting for jobs')
+  setAgentStatus(JUDGE_TAB, 'running', 'starting…')
+  void getJudgeQueueCounts()
+    .then((c) => setAgentStatus(JUDGE_TAB, 'running', `${c.waiting} waiting in queue`))
+    .catch(() => setAgentStatus(JUDGE_TAB, 'running', 'waiting for jobs'))
 }
 
 export async function stopJudgeWorker(): Promise<void> {

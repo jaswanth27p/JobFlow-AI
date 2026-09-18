@@ -11,6 +11,7 @@ function makeConfig(): AppConfig {
     urlGroups: [],
     requirements: 'placeholder',
     concurrency: 1,
+    judgeConcurrency: 10,
     model: 'test',
     models: {},
     notifySummaryIntervalMinutes: 30,
@@ -23,7 +24,7 @@ function makeConfig(): AppConfig {
 
 beforeEach(() => {
   clearRegistryForTest()
-  initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+  initAppState({ concurrency: 1, judgeConcurrency: 3, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
   setCurrentConfig(makeConfig())
   registerSearchCommands()
 })

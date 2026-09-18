@@ -4,12 +4,7 @@ import { getDb, closeDb } from '../../../src/db/index.ts'
 import { jobContents } from '../../../src/db/schema.ts'
 import { initAppState } from '../../../src/state/app-state.ts'
 
-// Note: the brief's initAppState call included a `judgeConcurrency` field,
-// but Settings (src/state/types.ts) has no such field on this branch — the
-// judge pool/slot model it referred to was already replaced by a single
-// concurrency:1 Worker before this task (see judge-worker.ts). Omitted here
-// so this object literal typechecks against the real Settings shape.
-initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+initAppState({ concurrency: 1, judgeConcurrency: 3, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
 
 const enqueueJudgeCalls: Array<{ jobId: string; sourceUrl: string }> = []
 

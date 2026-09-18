@@ -8,7 +8,7 @@ import { careerPages } from '../../../src/db/schema.ts'
 
 beforeEach(() => {
   clearRegistryForTest()
-  initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+  initAppState({ concurrency: 1, judgeConcurrency: 3, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
   registerCareerCommands()
 })
 

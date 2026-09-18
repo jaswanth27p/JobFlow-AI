@@ -114,6 +114,27 @@ describe('processJudgeJob', () => {
     await db.delete(jobs).where(eq(jobs.id, jobId))
     await db.delete(jobContents).where(eq(jobContents.jobId, jobId))
   })
+
+  test('judgeJob throwing is recorded as a safe skip verdict, not a transient failure', async () => {
+    const db = getDb()
+    const jobId = 'judge-worker-test-judge-throws'
+    await db.insert(jobContents).values({ jobId, sourceUrl: SOURCE_URL, content: 'Some role text' }).onConflictDoNothing()
+    // judgeJobResult stays null — the mocked judgeJob (see beforeEach above)
+    // throws in that case, exercising processJudgeJob's catch branch.
+
+    await expect(processJudgeJob(jobId, SOURCE_URL)).resolves.toBeUndefined()
+
+    const rows = await db.select().from(jobs).where(eq(jobs.id, jobId))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.status).toBe('skipped')
+    expect(rows[0]?.title).toBe('Unknown')
+    expect(rows[0]?.company).toBe('Unknown')
+    expect(rows[0]?.applyType).toBe('external')
+    expect(rows[0]?.relevanceReason).toStartWith('Relevance judge failed:')
+
+    await db.delete(jobs).where(eq(jobs.id, jobId))
+    await db.delete(jobContents).where(eq(jobContents.jobId, jobId))
+  })
 })
 
 describe('recordJudgeVerdict', () => {

@@ -41,13 +41,21 @@ export function App() {
     if (selection.getSelectedText()) copySelection()
   })
 
-  // Force a fresh layout/render pass whenever the visible log list grows.
-  // opentui's scrollbox occasionally mislays newly-added rows until the next
-  // full relayout (which a terminal resize triggers); nudging the renderer
-  // here settles it without the user having to resize.
+  // Force a fresh layout/render pass whenever anything visible in a tab
+  // changes. opentui's scrollbox occasionally mislays newly-added rows until
+  // the next full relayout (which a terminal resize triggers); nudging the
+  // renderer here settles it without the user having to resize. Status and
+  // step must be read too, not just logs — setAgentStatus() changes neither
+  // the log array nor its length, so a logs-only effect left the sidebar
+  // stuck on its initial "waiting for jobs" string until the next keypress.
   createEffect(() => {
-    // touch each tab's log length so this re-runs on any new log line
-    for (const tab of TAB_IDS) void appState.tabs[tab].logs.length
+    for (const tab of TAB_IDS) {
+      const state = appState.tabs[tab]
+      void state.logs.length
+      void state.status
+      void state.step
+      void state.needsInputQuestion
+    }
     renderer.requestRender()
   })
 

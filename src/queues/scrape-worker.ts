@@ -129,6 +129,7 @@ async function readJobText(jobId: string, browser: AgentBrowser, cdpUrl: string,
       const snap = await browser.snapshot({ interactiveOnly: false })
       jobText = 'snapshot' in snap && snap.snapshot ? snap.snapshot : ''
       if (jobText) break
+      pushLog(SCRAPE_TAB, `Job ${jobId}: detail pane still empty (attempt ${attempt + 1}/${DETAIL_PANE_MAX_ATTEMPTS}) — waiting and retrying.`)
     }
   } catch (err) {
     if (isBrowserConnectionError(err)) resetScrapeBrowser(cdpUrl)
@@ -158,6 +159,8 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
   if ((await waitForNetwork(SCRAPE_TAB, signal)) === 'aborted') return
 
   const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
+  pushLog(SCRAPE_TAB, `Fetching job ${jobId}…`)
+  setAgentStatus(SCRAPE_TAB, 'running', `fetching job ${jobId}`)
 
   let browser: AgentBrowser
   let cdpUrl: string
@@ -178,6 +181,7 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
 
   await db.insert(jobContents).values({ jobId, sourceUrl, content: jobText }).onConflictDoNothing()
   await enqueueJudgeJob(jobId, sourceUrl)
+  pushLog(SCRAPE_TAB, `Job ${jobId} fetched (${jobText.length} chars) — queued for judging.`)
 }
 
 let worker: Worker | null = null

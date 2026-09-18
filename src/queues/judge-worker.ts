@@ -111,6 +111,8 @@ export async function processJudgeJob(jobId: string, sourceUrl: string, signal?:
   if (signal?.aborted) return
 
   const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
+  pushLog(JUDGE_TAB, `Judging job ${jobId}… (${content.length} chars)`)
+  setAgentStatus(JUDGE_TAB, 'running', `judging job ${jobId}`)
 
   let verdict: Awaited<ReturnType<typeof judgeJob>>
   try {

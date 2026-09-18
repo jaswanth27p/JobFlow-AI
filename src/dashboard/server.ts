@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import tailwind from 'bun-plugin-tailwind'
-import { eq, desc, gte, sql, inArray, and } from 'drizzle-orm'
+import { eq, desc, gte, inArray, and } from 'drizzle-orm'
 import { getDb } from '../db/index.ts'
-import { jobs, applications, answerReviews, careerPages, careerPageScans } from '../db/schema.ts'
+import { jobs, applications, answerReviews } from '../db/schema.ts'
 import { getApplyQueueCounts } from '../queues/apply-queues.ts'
 import { getCurrentConfig } from '../config/current.ts'
 import { saveLearnedAnswer } from '../profile/loader.ts'
@@ -15,7 +15,6 @@ import type {
   SummaryDto,
   ApplicationDto,
   ExternalJobDto,
-  CareerPageDto,
   GroupedQuestion,
   RetryWithAnswerBody,
   RetryJobBody,
@@ -202,31 +201,6 @@ async function handleBulkMarkExternalApplied(req: Request): Promise<Response> {
   return json({ ok: true, count: updated.length } satisfies BulkOkResponse)
 }
 
-async function getCareerPages(): Promise<CareerPageDto[]> {
-  const db = getDb()
-  const rows = await db
-    .select({
-      id: careerPages.id,
-      url: careerPages.url,
-      label: careerPages.label,
-      addedAt: careerPages.addedAt,
-      lastCheckedAt: careerPages.lastCheckedAt,
-      totalScanned: sql<number>`coalesce(sum(${careerPageScans.scannedCount}), 0)`,
-      relevantFound: sql<number>`coalesce(sum(${careerPageScans.relevantCount}), 0)`,
-      totalSkipped: sql<number>`coalesce(sum(${careerPageScans.skippedCount}), 0)`,
-    })
-    .from(careerPages)
-    .leftJoin(careerPageScans, eq(careerPageScans.careerPageId, careerPages.id))
-    .groupBy(careerPages.id)
-    .orderBy(careerPages.addedAt)
-
-  return rows.map((r) => ({
-    ...r,
-    addedAt: r.addedAt?.toISOString() ?? null,
-    lastCheckedAt: r.lastCheckedAt?.toISOString() ?? null,
-  }))
-}
-
 async function loadReviewedPairs() {
   const db = getDb()
   return db.select({ question: answerReviews.question, answer: answerReviews.answer }).from(answerReviews)
@@ -369,7 +343,6 @@ export async function handleRequest(req: Request): Promise<Response> {
     if (req.method === 'POST' && pathname === '/api/review/generate') return handleGenerateClusters()
     if (req.method === 'POST' && pathname === '/api/review/cluster-feedback') return handleClusterFeedback(req)
     if (req.method === 'POST' && pathname === '/api/review/feedback') return handleFeedback(req)
-    if (req.method === 'GET' && pathname === '/api/career-pages') return json(await getCareerPages())
     return json({ error: 'not found' }, 404)
   }
 

@@ -6,7 +6,6 @@ const NAV_ITEMS = [
   { to: '/applications', label: 'Applications', end: false },
   { to: '/external-jobs', label: 'External Jobs', end: false },
   { to: '/review', label: 'Review', end: false },
-  { to: '/career-pages', label: 'Career Pages', end: false },
 ]
 
 export function Layout() {

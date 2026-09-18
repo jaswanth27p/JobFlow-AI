@@ -2,7 +2,6 @@ import type {
   SummaryDto,
   ApplicationDto,
   ExternalJobDto,
-  CareerPageDto,
   GroupedQuestion,
   RetryWithAnswerBody,
   RetryJobBody,
@@ -44,7 +43,6 @@ export const api = {
   markExternalJobApplied: (body: MarkAppliedBody) => postJson<MarkAppliedBody, ApiOk>('/api/external-jobs/mark-applied', body),
   markExternalJobsAppliedBulk: (body: BulkMarkAppliedBody) =>
     postJson<BulkMarkAppliedBody, BulkOkResponse>('/api/external-jobs/mark-applied-bulk', body),
-  getCareerPages: () => getJson<CareerPageDto[]>('/api/career-pages'),
   getUnreviewed: () => getJson<GroupedQuestion[]>('/api/review/unreviewed'),
   generateClusters: () => postJson<Record<string, never>, GenerateClustersResponse>('/api/review/generate', {}),
   submitFeedback: (body: ReviewFeedbackBody) => postJson<ReviewFeedbackBody, ApiOk>('/api/review/feedback', body),

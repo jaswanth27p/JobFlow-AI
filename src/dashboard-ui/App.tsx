@@ -7,7 +7,6 @@ import { SummaryPage } from './pages/Summary.tsx'
 import { ApplicationsPage } from './pages/Applications.tsx'
 import { ExternalJobsPage } from './pages/ExternalJobs.tsx'
 import { ReviewPage } from './pages/Review.tsx'
-import { CareerPagesPage } from './pages/CareerPages.tsx'
 
 export function App() {
   return (
@@ -20,7 +19,6 @@ export function App() {
               <Route path="applications" element={<ApplicationsPage />} />
               <Route path="external-jobs" element={<ExternalJobsPage />} />
               <Route path="review" element={<ReviewPage />} />
-              <Route path="career-pages" element={<CareerPagesPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

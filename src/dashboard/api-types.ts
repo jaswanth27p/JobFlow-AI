@@ -50,17 +50,6 @@ export interface ExternalJobDto {
   updatedAt: string | null
 }
 
-export interface CareerPageDto {
-  id: string
-  label: string
-  url: string
-  addedAt: string | null
-  lastCheckedAt: string | null
-  totalScanned: number
-  relevantFound: number
-  totalSkipped: number
-}
-
 export interface RetryWithAnswerBody {
   jobId: string
   question: string

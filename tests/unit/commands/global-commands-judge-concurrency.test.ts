@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, mock } from 'bun:test'
+import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
 import { clearRegistryForTest, getCommand } from '../../../src/commands/registry.ts'
 import { initAppState, appState } from '../../../src/state/app-state.ts'
 
@@ -21,6 +21,15 @@ mock.module('../../../src/queues/judge-worker.ts', () => ({
 
 const globalSpecifier = '../../../src/commands/global-commands.ts?__set_test'
 const { registerGlobalCommands } = await import(globalSpecifier)
+
+// Restore the real judge-worker module — a partial mock left registered would
+// leak into later test files (Bun's mock.module is process-global), same as
+// judge-worker.test.ts's afterAll restore.
+afterAll(async () => {
+  const judgeWorkerSpecifier = '../../../src/queues/judge-worker.ts?__restore_set_judge_concurrency_test'
+  const judgeWorkerReal = await import(judgeWorkerSpecifier)
+  mock.module('../../../src/queues/judge-worker.ts', () => ({ ...judgeWorkerReal }))
+})
 
 function runSet(key: string, value: string): Promise<void> | void {
   return getCommand('set')!.run({ args: [key, value], rawArgs: `${key} ${value}` })

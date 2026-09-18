@@ -135,7 +135,7 @@ interface ScanRunContext {
   /** New job ids handed off to the judge queue this run — mirrors
    * searchRuns.relevantCount (a proxy: "found and worth judging", not yet an
    * actual relevance verdict, which the judge worker produces later). */
-  queuedForJudge: number
+  queuedForScrape: number
 }
 
 /** Merges freshly-DOM-queried job ids into a page's running collected order,
@@ -403,7 +403,7 @@ async function scanOneUrl(entry: ScanUrlEntry, ctx: ScanRunContext, browser: Age
       ctx.alreadySeen += pageIds.length - newIds.length
       for (const id of newIds) {
         await enqueueScrapeJob(id, entry.url)
-        ctx.queuedForJudge++
+        ctx.queuedForScrape++
       }
       if (newIds.length > 0) {
         pushLog(SEARCH_TAB, `Queued ${newIds.length} new job(s) for judgment (${pageIds.length - newIds.length} already seen).`)
@@ -427,7 +427,7 @@ async function scanOneUrl(entry: ScanUrlEntry, ctx: ScanRunContext, browser: Age
 }
 
 export interface SearchRunResult {
-  queuedForJudge: number
+  queuedForScrape: number
   urlsTried: string[]
 }
 
@@ -443,7 +443,7 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
   if (isSearchRunning()) throw new Error('A search is already running')
   if (entries.length === 0) {
     pushLog(SEARCH_TAB, 'No search URLs to run.')
-    return { queuedForJudge: 0, urlsTried: [] }
+    return { queuedForScrape: 0, urlsTried: [] }
   }
 
   const abort = new AbortController()
@@ -453,7 +453,7 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
   const runId = randomUUID()
   await db.insert(searchRuns).values({ id: runId, urlsTried: [] })
 
-  const ctx: ScanRunContext = { signal: abort.signal, totalIdsSeen: 0, alreadySeen: 0, queuedForJudge: 0 }
+  const ctx: ScanRunContext = { signal: abort.signal, totalIdsSeen: 0, alreadySeen: 0, queuedForScrape: 0 }
   const cdpUrl = getSharedCdpUrl()
 
   try {
@@ -496,7 +496,7 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
         .set({
           urlsTried: triedUrls,
           scannedCount: ctx.totalIdsSeen,
-          relevantCount: ctx.queuedForJudge,
+          relevantCount: ctx.queuedForScrape,
           skippedCount: ctx.alreadySeen,
         })
         .where(eq(searchRuns.id, runId))
@@ -515,17 +515,17 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
 
     const stopped = abort.signal.aborted ? ' (stopped early)' : ''
     const summary =
-      ctx.queuedForJudge === 0
-        ? `Finished searching ${triedUrls.length} URL(s)${stopped}. No new jobs queued for judgment.`
-        : `Finished searching ${triedUrls.length} URL(s)${stopped}. Queued ${ctx.queuedForJudge} new job(s) for judgment (${ctx.alreadySeen} already seen).`
+      ctx.queuedForScrape === 0
+        ? `Finished searching ${triedUrls.length} URL(s)${stopped}. No new jobs queued for scraping.`
+        : `Finished searching ${triedUrls.length} URL(s)${stopped}. Queued ${ctx.queuedForScrape} new job(s) for scraping (${ctx.alreadySeen} already seen).`
     pushLog(SEARCH_TAB, summary)
     logger.info(
-      { totalIdsSeen: ctx.totalIdsSeen, queuedForJudge: ctx.queuedForJudge, alreadySeen: ctx.alreadySeen, urls: triedUrls.length },
+      { totalIdsSeen: ctx.totalIdsSeen, queuedForScrape: ctx.queuedForScrape, alreadySeen: ctx.alreadySeen, urls: triedUrls.length },
       'search: run finished',
     )
     setAgentStatus(SEARCH_TAB, 'idle', null)
 
-    return { queuedForJudge: ctx.queuedForJudge, urlsTried: triedUrls }
+    return { queuedForScrape: ctx.queuedForScrape, urlsTried: triedUrls }
   } finally {
     activeAbort = null
     // Always drop back to idle — without this, a thrown error (surfaced to the

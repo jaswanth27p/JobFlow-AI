@@ -1,21 +1,41 @@
 import { describe, test, expect, mock, beforeEach, afterAll } from 'bun:test'
 import { eq } from 'drizzle-orm'
 import { getDb, closeDb } from '../../../src/db/index.ts'
-import { jobs } from '../../../src/db/schema.ts'
+import { jobs, jobContents } from '../../../src/db/schema.ts'
 import { initAppState, appState } from '../../../src/state/app-state.ts'
 import { processJudgeJob, recordJudgeVerdict } from '../../../src/queues/judge-worker.ts'
 import type { JobJudgeVerdict } from '../../../src/agents/job-relevance-judge.ts'
 
-initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+initAppState({ concurrency: 1, judgeConcurrency: 3, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
 
 // enqueueApplyJob (apply-queues.ts) opens a real ioredis connection as a side
 // effect of module load / first call — mocked out so this file's DB-only
 // assertions don't require Redis. recordExternalJobFound is a module-level
 // counter (summary-aggregator.ts) shared process-wide across test files, same
-// reasoning as easy-apply-agent.test.ts's mock of it.
+// reasoning as easy-apply-agent.test.ts's mock of it. judgeJob is mocked so
+// the "reads job_contents and judges" test doesn't make a real LLM call.
+// config/current.ts is also mocked: getCurrentConfig() throws "Config not
+// loaded yet" until src/index.ts's real startup path calls setCurrentConfig,
+// which never happens in this unit test file (bun test gives each test file
+// its own module registry, so another file's setCurrentConfig call never
+// reaches this one) — processJudgeJob's resolveModel(getCurrentConfig(), ...)
+// call would otherwise throw before ever reaching the mocked judgeJob above.
+let judgeJobResult: JobJudgeVerdict | null = null
+
 beforeEach(() => {
   mock.module('../../../src/queues/apply-queues.ts', () => ({ enqueueApplyJob: async () => {} }))
   mock.module('../../../src/notify/summary-aggregator.ts', () => ({ recordExternalJobFound: () => {} }))
+  mock.module('../../../src/config/current.ts', () => ({
+    getCurrentConfig: () => ({ models: {} }),
+    setCurrentConfig: () => {},
+  }))
+  mock.module('../../../src/agents/job-relevance-judge.ts', () => ({
+    judgeJob: async () => {
+      if (!judgeJobResult) throw new Error('judgeJobResult not set for this test')
+      return judgeJobResult
+    },
+  }))
+  judgeJobResult = null
 })
 
 afterAll(async () => {
@@ -26,6 +46,14 @@ afterAll(async () => {
   const summarySpecifier = '../../../src/notify/summary-aggregator.ts?__restore_real_judge_worker_test'
   const summaryReal = await import(summarySpecifier)
   mock.module('../../../src/notify/summary-aggregator.ts', () => ({ ...summaryReal }))
+
+  const configCurrentSpecifier = '../../../src/config/current.ts?__restore_real_judge_worker_test'
+  const configCurrentReal = await import(configCurrentSpecifier)
+  mock.module('../../../src/config/current.ts', () => ({ ...configCurrentReal }))
+
+  const judgeAgentSpecifier = '../../../src/agents/job-relevance-judge.ts?__restore_real_judge_worker_test'
+  const judgeAgentReal = await import(judgeAgentSpecifier)
+  mock.module('../../../src/agents/job-relevance-judge.ts', () => ({ ...judgeAgentReal }))
 
   await closeDb()
 })
@@ -52,6 +80,39 @@ describe('processJudgeJob', () => {
     expect(appState.tabs.judge.logs.some((l) => l.includes('already recorded'))).toBe(true)
 
     await db.delete(jobs).where(eq(jobs.id, 'judge-worker-test-dup'))
+  })
+
+  test('throws when job_contents has no row for the id yet (scrape has not committed) — no jobs row written', async () => {
+    const jobId = 'judge-worker-test-missing-content'
+    await expect(processJudgeJob(jobId, SOURCE_URL)).rejects.toThrow()
+
+    const db = getDb()
+    const rows = await db.select().from(jobs).where(eq(jobs.id, jobId))
+    expect(rows).toHaveLength(0)
+  })
+
+  test('reads job_contents.content and judges it, recording the verdict', async () => {
+    const db = getDb()
+    const jobId = 'judge-worker-test-reads-content'
+    await db.insert(jobContents).values({ jobId, sourceUrl: SOURCE_URL, content: 'Backend Engineer role text' }).onConflictDoNothing()
+    judgeJobResult = {
+      title: 'Backend Engineer',
+      company: 'Acme',
+      location: 'Remote',
+      applyType: 'easy',
+      externalUrl: null,
+      verdict: 'relevant',
+      reason: 'Good fit.',
+    }
+
+    await processJudgeJob(jobId, SOURCE_URL)
+
+    const rows = await db.select().from(jobs).where(eq(jobs.id, jobId))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.status).toBe('queued')
+
+    await db.delete(jobs).where(eq(jobs.id, jobId))
+    await db.delete(jobContents).where(eq(jobContents.jobId, jobId))
   })
 })
 
@@ -158,7 +219,6 @@ describe('recordJudgeVerdict', () => {
 
     const rows = await db.select().from(jobs).where(eq(jobs.id, jobId))
     expect(rows).toHaveLength(1)
-    // Untouched by the conflicting insert — still the original row.
     expect(rows[0]?.status).toBe('applied')
     expect(rows[0]?.title).toBe('Existing Title')
 

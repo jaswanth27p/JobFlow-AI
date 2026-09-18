@@ -14,6 +14,7 @@ import { hasTheme } from '../tui/theme/index.ts'
 import { persistThemeName } from '../tui/theme/persist.ts'
 import { loadConfig } from '../config/loader.ts'
 import { setCurrentConfig } from '../config/current.ts'
+import { startJudgeWorker, stopJudgeWorker, isJudgeWorkerRunning } from '../queues/judge-worker.ts'
 import { logger } from '../utils/logger.ts'
 import { summarizeError } from '../utils/error-summary.ts'
 
@@ -70,8 +71,8 @@ export function registerGlobalCommands(): void {
   registerCommand({
     name: 'set',
     scope: 'global',
-    description: '/set <concurrency|model|minNavDelayMs|maxNavDelayMs|loopCooldownMs> <value>',
-    run: (ctx) => {
+    description: '/set <concurrency|judgeConcurrency|model|minNavDelayMs|maxNavDelayMs|loopCooldownMs> <value>',
+    run: async (ctx) => {
       const [key, ...rest] = ctx.args
       const value = rest.join(' ')
 
@@ -84,6 +85,7 @@ export function registerGlobalCommands(): void {
           title: 'Change a setting',
           items: [
             { label: 'concurrency', value: 'concurrency', hint: 'parallel easy-apply jobs' },
+            { label: 'judgeConcurrency', value: 'judgeConcurrency', hint: 'parallel judge-queue workers' },
             { label: 'model', value: 'model', hint: 'LLM model id' },
             { label: 'minNavDelayMs', value: 'minNavDelayMs', hint: 'min pause after navigation' },
             { label: 'maxNavDelayMs', value: 'maxNavDelayMs', hint: 'max pause after navigation' },
@@ -98,6 +100,7 @@ export function registerGlobalCommands(): void {
       // `/set concurrency abc` poison the live settings with NaN.
       const numericRules: Partial<Record<keyof Settings, { min: number; integer: boolean; max?: number }>> = {
         concurrency: { min: 1, integer: true },
+        judgeConcurrency: { min: 1, max: 10, integer: true },
         minNavDelayMs: { min: 0, integer: true },
         maxNavDelayMs: { min: 0, integer: true },
         loopCooldownMs: { min: 60_000, integer: true },
@@ -123,11 +126,21 @@ export function registerGlobalCommands(): void {
           pushLog(appState.activeTab, `Invalid value for ${key}: "${value}". Expected ${rule.integer ? 'an integer' : 'a number'} ${range}.`)
           return
         }
-        setSetting(key as 'concurrency', num)
+        setSetting(key as 'concurrency' | 'judgeConcurrency', num)
+
+        // Judge concurrency only takes effect when the worker restarts, so a
+        // live change means tearing down the current Worker and starting a
+        // fresh one at the new concurrency. In-flight jobs are aborted; their
+        // content stays in job_contents and is picked up again next attempt.
+        if (key === 'judgeConcurrency' && isJudgeWorkerRunning()) {
+          await stopJudgeWorker()
+          startJudgeWorker(num)
+          pushLog(appState.activeTab, `Judge queue restarted with concurrency ${num}.`)
+        }
       } else {
         pushLog(
           appState.activeTab,
-          `Unknown setting: ${key}. Use concurrency, model, minNavDelayMs, maxNavDelayMs, or loopCooldownMs.`,
+          `Unknown setting: ${key}. Use concurrency, judgeConcurrency, model, minNavDelayMs, maxNavDelayMs, or loopCooldownMs.`,
         )
         return
       }

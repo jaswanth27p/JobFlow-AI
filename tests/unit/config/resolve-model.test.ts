@@ -7,6 +7,7 @@ function makeConfig(models: AppConfig['models']): AppConfig {
     urlGroups: [],
     requirements: 'placeholder',
     concurrency: 1,
+    judgeConcurrency: 3,
     model: 'default-model',
     models,
     notifySummaryIntervalMinutes: 30,

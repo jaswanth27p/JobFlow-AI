@@ -46,4 +46,18 @@ describe('loadConfig', () => {
     expect(config.urlGroups[0]!.urls[0]!.scanFullList).toBe(false)
     expect(config.models).toEqual({})
   })
+
+  test('defaults judgeConcurrency to 10 and rejects out-of-range or non-integer values', async () => {
+    const { appConfigSchema } = await import('../../../src/config/schema.ts')
+    const base = {
+      urlGroups: [{ name: 'Default', urls: [{ url: 'https://example.com' }] }],
+      requirements: 'remote',
+      profileFiles: { resume: './resume.md', profile: './profile.json' },
+    }
+    expect(appConfigSchema.parse(base).judgeConcurrency).toBe(10)
+    expect(appConfigSchema.parse({ ...base, judgeConcurrency: 1 }).judgeConcurrency).toBe(1)
+    expect(() => appConfigSchema.parse({ ...base, judgeConcurrency: 0 })).toThrow()
+    expect(() => appConfigSchema.parse({ ...base, judgeConcurrency: 11 })).toThrow()
+    expect(() => appConfigSchema.parse({ ...base, judgeConcurrency: 2.5 })).toThrow()
+  })
 })

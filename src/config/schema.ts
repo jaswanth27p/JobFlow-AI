@@ -21,6 +21,15 @@ export const appConfigSchema = z.object({
    * already-filtered by its own LinkedIn search params. */
   requirements: z.string().min(1),
   concurrency: z.number().positive().default(1),
+  /** Parallel LLM relevance-judge calls (job-judge queue). No browser is
+   * involved in this stage at all — see docs/superpowers/specs/
+   * 2026-09-18-judge-scrape-split-design.md — so this is purely how many
+   * concurrent judgeJob() calls run at once. Default 10, capped at 10 mainly
+   * as a sane ceiling on concurrent LLM requests, not a resource limit. The
+   * browser-driven scrape stage that feeds this queue has no concurrency
+   * knob at all (always 1) — see scrape-worker.ts. Live-tunable via
+   * /set judgeConcurrency. */
+  judgeConcurrency: z.number().int().min(1).max(10).default(10),
   /** Default/fallback model — used by any agent kind not given an explicit
    * override in `models` below. Also the value /set model edits live at
    * runtime. */

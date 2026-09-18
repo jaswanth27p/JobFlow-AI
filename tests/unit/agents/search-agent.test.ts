@@ -1,4 +1,5 @@
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect, afterAll } from 'bun:test'
+import { eq } from 'drizzle-orm'
 import {
   mergeChecklistIds,
   shouldStopScrolling,
@@ -7,7 +8,10 @@ import {
   isLastPage,
   detectCheckpointUrl,
   FULL_PAGE_SIZE,
+  filterUnseenJobIds,
 } from '../../../src/agents/search-agent.ts'
+import { getDb, closeDb } from '../../../src/db/index.ts'
+import { jobContents } from '../../../src/db/schema.ts'
 
 describe('mergeChecklistIds', () => {
   test('appends new ids without disturbing existing order', () => {
@@ -121,5 +125,26 @@ describe('detectCheckpointUrl', () => {
 
   test('leaves a normal jobs search URL alone', () => {
     expect(detectCheckpointUrl('https://www.linkedin.com/jobs/search/?keywords=engineer')).toBeNull()
+  })
+})
+
+afterAll(async () => {
+  await closeDb()
+})
+
+describe('filterUnseenJobIds', () => {
+  test('excludes ids already present in job_contents, not just jobs', async () => {
+    const db = getDb()
+    const scrapedId = 'search-dedupe-test-scraped'
+    await db.insert(jobContents).values({
+      jobId: scrapedId,
+      sourceUrl: 'https://linkedin.com/jobs/search/?keywords=x',
+      content: 'placeholder',
+    }).onConflictDoNothing()
+
+    const result = await filterUnseenJobIds([scrapedId, 'search-dedupe-test-new'])
+    expect(result).toEqual(['search-dedupe-test-new'])
+
+    await db.delete(jobContents).where(eq(jobContents.jobId, scrapedId))
   })
 })

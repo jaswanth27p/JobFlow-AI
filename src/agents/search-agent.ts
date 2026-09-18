@@ -6,10 +6,10 @@ import type { Page } from 'playwright-core'
 import { getSharedCdpUrl } from '../browser/session.ts'
 import { openOwnTab, navigateOwnTab, reclaimOwnTab, isBrowserConnectionError, isOwnedTabGoneError, type OwnedTab } from '../browser/tab-guard.ts'
 import { getDb } from '../db/index.ts'
-import { jobs, searchRuns } from '../db/schema.ts'
+import { jobs, jobContents, searchRuns } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
 import { waitForAnswer } from '../state/prompt-channel.ts'
-import { enqueueJudgeJob } from '../queues/judge-queues.ts'
+import { enqueueScrapeJob } from '../queues/scrape-queues.ts'
 import { logger } from '../utils/logger.ts'
 import { summarizeError } from '../utils/error-summary.ts'
 import { waitForNetwork } from '../utils/network.ts'
@@ -337,12 +337,20 @@ async function collectPageIds(page: Page, signal: AbortSignal): Promise<string[]
 }
 
 /** Batch dedupe check — a single `id IN (...)` query per page instead of one
- * query per id, now that nothing needs a per-id tool round-trip. */
-async function filterUnseenJobIds(ids: string[]): Promise<string[]> {
+ * query per id, now that nothing needs a per-id tool round-trip. Excludes ids
+ * already judged (`jobs`) AND ids already scraped but not yet judged
+ * (`job_contents`) — without the second check, a job scraped-but-pending in
+ * the judge queue would look "new" again on the very next scan cycle and get
+ * re-enqueued onto job-scrape, doing the browser work twice. Exported for
+ * direct unit testing (see search-agent.test.ts). */
+export async function filterUnseenJobIds(ids: string[]): Promise<string[]> {
   if (ids.length === 0) return []
   const db = getDb()
-  const rows = await db.select({ id: jobs.id }).from(jobs).where(inArray(jobs.id, ids))
-  const known = new Set(rows.map((r) => r.id))
+  const [judgedRows, scrapedRows] = await Promise.all([
+    db.select({ id: jobs.id }).from(jobs).where(inArray(jobs.id, ids)),
+    db.select({ id: jobContents.jobId }).from(jobContents).where(inArray(jobContents.jobId, ids)),
+  ])
+  const known = new Set([...judgedRows.map((r) => r.id), ...scrapedRows.map((r) => r.id)])
   return ids.filter((id) => !known.has(id))
 }
 
@@ -394,7 +402,7 @@ async function scanOneUrl(entry: ScanUrlEntry, ctx: ScanRunContext, browser: Age
       const newIds = await filterUnseenJobIds(pageIds)
       ctx.alreadySeen += pageIds.length - newIds.length
       for (const id of newIds) {
-        await enqueueJudgeJob(id, entry.url)
+        await enqueueScrapeJob(id, entry.url)
         ctx.queuedForJudge++
       }
       if (newIds.length > 0) {

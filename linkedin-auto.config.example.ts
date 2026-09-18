@@ -24,6 +24,12 @@ export default {
     Avoid roles requiring more than 8 years of experience.
   `,
   concurrency: 1,
+  // Parallel LLM relevance-judge calls — no browser involved, so this is
+  // just concurrent judgeJob() calls (cheap). The browser stage that fetches
+  // job content ahead of this always runs serially (1 browser, no knob) to
+  // avoid tripping LinkedIn's rate limiting. 1-10, default 10. Live-tunable
+  // via /set judgeConcurrency.
+  judgeConcurrency: 10,
   profileFiles: {
     resume: "./resume.md",
     profile: "./profile.json",

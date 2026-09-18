@@ -1,7 +1,7 @@
 import { describe, test, expect, afterAll } from 'bun:test'
 import { eq } from 'drizzle-orm'
 import { getDb, closeDb } from '../../../src/db/index.ts'
-import { jobs, applications, answerReviews } from '../../../src/db/schema.ts'
+import { jobs, applications, answerReviews, jobContents } from '../../../src/db/schema.ts'
 
 describe('db schema', () => {
   afterAll(async () => {
@@ -87,5 +87,33 @@ describe('db schema', () => {
     expect(rows[0]?.verdict).toBe('wrong')
 
     await db.delete(answerReviews).where(eq(answerReviews.id, 'test-review-1'))
+  })
+
+  test('job_contents stores scraped content keyed by job id, onConflictDoNothing on a re-insert', async () => {
+    const db = getDb()
+    const jobId = 'test-job-contents-1'
+    await db.insert(jobContents).values({
+      jobId,
+      sourceUrl: 'https://linkedin.com/jobs/search/?keywords=engineer',
+      content: 'Senior Backend Engineer at Acme...',
+    })
+
+    const rows = await db.select().from(jobContents).where(eq(jobContents.jobId, jobId))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.content).toBe('Senior Backend Engineer at Acme...')
+
+    // Duplicate insert (simulating a re-delivered scrape job) must not throw
+    // and must not create a second row.
+    await db.insert(jobContents).values({
+      jobId,
+      sourceUrl: 'https://linkedin.com/jobs/search/?keywords=engineer',
+      content: 'different content',
+    }).onConflictDoNothing()
+
+    const rowsAfter = await db.select().from(jobContents).where(eq(jobContents.jobId, jobId))
+    expect(rowsAfter).toHaveLength(1)
+    expect(rowsAfter[0]?.content).toBe('Senior Backend Engineer at Acme...')
+
+    await db.delete(jobContents).where(eq(jobContents.jobId, jobId))
   })
 })

@@ -20,6 +20,20 @@ export const jobs = pgTable('jobs', {
   updatedAt: timestamp('updated_at').defaultNow(),
 })
 
+/** Raw content the scrape stage read from a job's detail page, keyed by the
+ * same LinkedIn job id `jobs.id` uses. A separate table (not columns on
+ * `jobs`) because `jobs.title`/`jobs.company`/`jobs.applyType` are all
+ * NOT NULL and only exist once a job has been JUDGED — storing pre-judgment
+ * content on `jobs` would force placeholder values and leak unjudged rows
+ * into the dashboard. This table is the scrape stage's own record. */
+export const jobContents = pgTable('job_contents', {
+  jobId: text('job_id').primaryKey(),
+  sourceUrl: text('source_url').notNull(),
+  content: text('content').notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+})
+
 /** How a submitted form answer was resolved — mirrors the resolution order both
  * apply agents' instructions spell out (structured profile field, previously-
  * learned answer, LLM inference, or a fresh human answer). */

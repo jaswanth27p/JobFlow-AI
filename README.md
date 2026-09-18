@@ -6,7 +6,7 @@ It does **not** store or ask for your LinkedIn password. You log in by hand, onc
 
 ## What it does
 
-- **Search** — runs the LinkedIn search-result URLs you configure (`mustCheckUrls`), once or on a loop/interval. Every new job it finds gets recorded and routed: no relevance judgment against your resume/requirements for LinkedIn, since your search URL's own filters (keywords, location, date posted) are trusted as the relevance signal.
+- **Search** — runs the LinkedIn search-result URLs you configure (`urlGroups`), once or on a loop/interval. Your search URL's own filters (keywords, location, date posted) decide what enters the queue, but every scraped job is then relevance-judged against your resume/profile and `requirements`.
 - **Easy Apply** — works through LinkedIn's own "Easy Apply" queue, filling out the multi-step form for each job.
 - **External jobs — saved, not automated** — a job that hands off to the company's own site is saved to the database with its apply link and you get a desktop notification. There's no automated apply flow for external sites: every company's apply form is different enough that scripted automation there breaks constantly, so this app doesn't attempt it.
 - **Learns as it goes** — the first time it hits a question it can't answer on its own, it asks you once, then remembers the answer (`profile.json`) so it's never asked again.
@@ -14,7 +14,7 @@ It does **not** store or ask for your LinkedIn password. You log in by hand, onc
 
 ## How it works (short version)
 
-One Bun process runs everything: a terminal UI (four tabs — Search / Easy Apply / Scrape / Judge Queue), a background browser it drives via [Playwright](https://playwright.dev/) over Chrome DevTools Protocol, and two [Mastra](https://mastra.ai/) AI agents (career-scan removed; the LinkedIn search path is deterministic and the easy-apply agent fills forms) that each get their own set of tools (navigate, click, type, plus a handful of app-specific ones) and figure out the actual steps themselves — they're not scripted click-sequences, so they adapt to whatever a given job posting or apply form actually looks like. Job/application records live in Postgres; the queue between "found an Easy Apply job" and "applied to it" is BullMQ/Redis. External jobs (from either agent) skip the queue entirely — they're saved with their apply link and you get a desktop notification instead.
+One Bun process runs everything: a terminal UI (four tabs — Search / Easy Apply / Scrape / Judge Queue), a background browser it drives via [Playwright](https://playwright.dev/) over Chrome DevTools Protocol, and a [Mastra](https://mastra.ai/) AI agent for Easy Apply. The LinkedIn search/scan path is deterministic — no LLM, just DOM reads and pagination — while the easy-apply agent gets its own set of browser tools (navigate, click, type, plus a handful of app-specific ones) and figures out the actual form steps itself, so it adapts to whatever a given apply form actually looks like instead of following a scripted click-sequence. Job/application records live in Postgres; the queue between "found an Easy Apply job" and "applied to it" is BullMQ/Redis. External jobs (from the judge stage) skip the queue entirely — they're saved with their apply link and you get a desktop notification instead.
 
 For the full technical design (and where the real implementation differs from the original plan), see [`docs/superpowers/specs/2026-07-14-tui-rebuild-design.md`](docs/superpowers/specs/2026-07-14-tui-rebuild-design.md). For codebase-level orientation, see [`CLAUDE.md`](CLAUDE.md).
 
@@ -193,7 +193,7 @@ Once `/verify-login` succeeds, every command below is available. Commands are sc
 | `/process-easy-queue` | easy | Start working through queued Easy Apply jobs |
 | `/stop-easy-queue` | easy | Stop the Easy Apply worker |
 
-**External jobs (from LinkedIn)** are never auto-applied — they're saved to the database with their apply link, and you get a desktop notification (title, company, and the link). Check them anytime at `http://127.0.0.1:4870/external-jobs`, or in the External Jobs tab in the TUI.
+**External jobs (from LinkedIn)** are never auto-applied — they're saved to the database with their apply link, and you get a desktop notification (title, company, and the link). Check them anytime at `http://127.0.0.1:4870/external-jobs`.
 
 A small review dashboard also runs at `http://127.0.0.1:4870` (loopback only; port via `DASHBOARD_PORT`) — today's stats, Easy Apply application history, external jobs found, and a review page where you can mark recorded answers correct/wrong (corrections feed back into `profile.json`).
 

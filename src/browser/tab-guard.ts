@@ -116,11 +116,19 @@ async function findOwnTab(browser: AgentBrowser, tab: OwnedTab): Promise<TabList
  * when its built-in navigation fails. That action's implementation is
  * `newTab()` followed by `page.goto(url)`; if the goto throws (e.g. LinkedIn
  * answering with an HTTP error status under load, `net::ERR_HTTP_RESPONSE_CODE_FAILURE`)
- * the tab is NOT rolled back, but the tool still returns `success: false`.
- * The caller then throws without ever receiving an OwnedTab, so nothing can
- * close it — every retry of the same failing open leaks one more tab into the
- * same window, unbounded. Closing the tab whose creation pushed the count
- * past `beforeCount` is what keeps a browser window at a single tab. */
+ * the tab is NOT rolled back. The caller then throws without ever receiving an
+ * OwnedTab, so nothing can close it — every retry of the same failing open
+ * leaks one more tab into the same window, unbounded. Closing the tab whose
+ * creation pushed the count past `beforeCount` is what keeps a browser window
+ * at a single tab.
+ *
+ * NOTE: this must run on BOTH failure shapes. @mastra/agent-browser's `"new"`
+ * handler does `await page.goto(url)` OUTSIDE any try/catch (see its
+ * createAgentBrowserTools switch), so a failed navigation makes `tabs()`
+ * REJECT rather than return `success:false`. The original version only handled
+ * the returned-error shape, so every `net::ERR_HTTP_RESPONSE_CODE_FAILURE`
+ * open leaked a tab (observed: a window full of tabs after one throttled
+ * run). */
 async function closeTabLeakedByFailedOpen(browser: AgentBrowser, beforeCount: number): Promise<void> {
   try {
     const after = await browser.tabs({ action: 'list' })
@@ -141,7 +149,16 @@ export async function openOwnTab(browser: AgentBrowser, cdpUrl: string, url: str
   // closeTabLeakedByFailedOpen.
   const before = await browser.tabs({ action: 'list' })
   const beforeCount = before.success ? (before.tabs ?? []).length : 0
-  const result = await browser.tabs({ action: 'new', url })
+  let result: Awaited<ReturnType<AgentBrowser['tabs']>>
+  try {
+    result = await browser.tabs({ action: 'new', url })
+  } catch (err) {
+    // The "new" action rejected mid-navigation (see doc comment above) — the
+    // tab it created is still open, so close it before propagating.
+    await closeTabLeakedByFailedOpen(browser, beforeCount)
+    const message = err instanceof Error ? err.message : String(err)
+    throw new Error(`Failed to open dedicated tab for ${url}: ${message}`)
+  }
   if (!result.success) {
     await closeTabLeakedByFailedOpen(browser, beforeCount)
     throw new Error(`Failed to open dedicated tab for ${url}: ${result.message}`)

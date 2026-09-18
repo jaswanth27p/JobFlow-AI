@@ -129,7 +129,27 @@ async function readJobText(jobId: string, browser: AgentBrowser, cdpUrl: string,
       const snap = await browser.snapshot({ interactiveOnly: false })
       jobText = 'snapshot' in snap && snap.snapshot ? snap.snapshot : ''
       if (jobText) break
-      pushLog(SCRAPE_TAB, `Job ${jobId}: detail pane still empty (attempt ${attempt + 1}/${DETAIL_PANE_MAX_ATTEMPTS}) — waiting and retrying.`)
+      // An empty snapshot is the failure that silently drops jobs, so record
+      // what the page actually was (url/title) rather than just "empty" —
+      // otherwise "could not read detail page" is indistinguishable between a
+      // login wall, a throttling/rejection page, and a slow-loading pane.
+      // Best-effort: must never throw over the original empty-snapshot result.
+      let look = ''
+      try {
+        const ev = await browser.evaluate({
+          script: 'JSON.stringify({ url: location.href, title: document.title, ready: document.readyState })',
+        })
+        look = 'success' in ev && ev.success ? String(ev.result) : JSON.stringify(ev)
+      } catch (e) {
+        look = `evaluate failed: ${e instanceof Error ? e.message : String(e)}`
+      }
+      const pageUrl = 'url' in snap ? String((snap as { url?: unknown }).url ?? '') : ''
+      const pageTitle = 'title' in snap ? String((snap as { title?: unknown }).title ?? '') : ''
+      logger.warn({ jobId, attempt, pageUrl, pageTitle, look }, 'scrape: empty detail-pane snapshot')
+      pushLog(
+        SCRAPE_TAB,
+        `Job ${jobId}: empty snapshot (attempt ${attempt + 1}/${DETAIL_PANE_MAX_ATTEMPTS}) url=${pageUrl || '?'} title=${pageTitle || '?'} ${look}`.slice(0, 300),
+      )
     }
   } catch (err) {
     if (isBrowserConnectionError(err)) resetScrapeBrowser(cdpUrl)

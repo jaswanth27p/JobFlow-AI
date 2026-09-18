@@ -116,6 +116,39 @@ describe('openOwnTab', () => {
 
     expect(calls.some((c) => c.action === 'close')).toBe(false)
   })
+
+  // The production failure shape: @mastra/agent-browser's "new" handler does
+  // `await page.goto(url)` outside any try/catch, so a failed navigation makes
+  // tabs() REJECT rather than return success:false. Handling only the returned
+  // error left a tab behind on every net::ERR_HTTP_RESPONSE_CODE_FAILURE.
+  test('closes the just-created tab when the open THROWS, not just when it returns success:false', async () => {
+    const before: TabListEntry[] = [{ index: 0, url: 'about:blank', title: '', active: false }]
+    const after: TabListEntry[] = [
+      ...before,
+      { index: 1, url: 'https://www.linkedin.com/jobs/view/1/', title: '', active: true },
+    ]
+    const calls: Array<Record<string, unknown>> = []
+    let listCount = 0
+    const browser = {
+      ensureReady: async () => {},
+      tabs: async (opts: Record<string, unknown>) => {
+        calls.push(opts)
+        if (opts.action === 'list') {
+          listCount++
+          return { success: true, tabs: listCount === 1 ? before : after }
+        }
+        if (opts.action === 'new') {
+          throw new Error('Tabs failed: goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://www.linkedin.com/jobs/view/1/')
+        }
+        return { success: true }
+      },
+    } as unknown as AgentBrowser
+
+    const err = await openOwnTab(browser, 'http://127.0.0.1:1', 'https://www.linkedin.com/jobs/view/1/', '/jobs/view/1').catch((e) => e)
+
+    expect(err).toBeInstanceOf(Error)
+    expect(calls.some((c) => c.action === 'close' && c.index === 1)).toBe(true)
+  })
 })
 
 describe('closeStrayTabs', () => {

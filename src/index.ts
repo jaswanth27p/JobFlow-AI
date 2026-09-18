@@ -11,7 +11,6 @@ import { initAppState } from './state/app-state.ts'
 import { registerBuiltinCommands } from './commands/index.ts'
 import { stopSearchAndWait } from './agents/search-agent.ts'
 import { stopAutoModeAndWait } from './agents/search-scheduler.ts'
-import { stopCareerCheckAndWait } from './agents/career-scan-agent.ts'
 import { stopEasyApplyWorker } from './queues/easy-apply-worker.ts'
 import { stopJudgeWorker } from './queues/judge-worker.ts'
 import { stopScrapeWorker } from './queues/scrape-worker.ts'
@@ -60,7 +59,6 @@ async function cleanup() {
   // queue is empty" from the outside.
   await stopAutoModeAndWait()
   await stopSearchAndWait()
-  await stopCareerCheckAndWait()
   await Promise.all([stopEasyApplyWorker(), stopScrapeWorker(), stopJudgeWorker()])
   await closeApplyQueues()
   await closeJudgeQueues()

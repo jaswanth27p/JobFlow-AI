@@ -17,16 +17,12 @@ import type { TabId } from '../state/types.ts'
 
 const JUDGE_TAB: TabId = 'judge'
 
-/** Persists a judge verdict and routes it. Unchanged from the pre-split
- * implementation — exported (and taking a plain verdict rather than a
- * browser) so this routing logic is directly testable against a real
- * test-DB row without a live browser/CDP session. */
 export async function recordJudgeVerdict(
   jobId: string,
   sourceUrl: string,
   applyUrl: string,
   verdict: Awaited<ReturnType<typeof judgeJob>>,
-): Promise<void> {
+): Promise<{ applyJob?: Job }> {
   const db = getDb()
   const status = verdict.verdict === 'skip' ? 'skipped' : verdict.applyType === 'easy' ? 'queued' : 'external_saved'
   const inserted = await db
@@ -45,11 +41,13 @@ export async function recordJudgeVerdict(
     .onConflictDoNothing()
     .returning({ id: jobs.id })
 
+  let applyJob: Job | undefined
+
   if (verdict.verdict === 'skip') {
     pushLog(JUDGE_TAB, `Reviewed "${verdict.title}" at ${verdict.company} (id ${jobId}) — not relevant, skipped. Reason: ${verdict.reason}`)
   } else if (inserted.length > 0) {
     if (verdict.applyType === 'easy') {
-      await enqueueApplyJob(jobId)
+      applyJob = await enqueueApplyJob(jobId)
       pushLog(JUDGE_TAB, `Found "${verdict.title}" at ${verdict.company} (id ${jobId}) — added to the Easy Apply queue.`)
     } else {
       recordExternalJobFound()
@@ -82,25 +80,20 @@ export async function recordJudgeVerdict(
       pushLog(JUDGE_TAB, `"${verdict.title}" at ${verdict.company} also lists an external apply link — saved that too.`)
     }
   }
+
+  return { applyJob }
 }
 
-/** Judges one queued job: re-checks for a duplicate delivery, reads the
- * content the scrape stage already persisted, judges it in isolation (no
- * browser anywhere in this function), records and routes the result.
- *
- * Missing job_contents is treated as transient (throws, so BullMQ retries
- * with backoff) rather than a judgment failure — the scrape stage may
- * simply not have committed its row yet on a fast-moving queue. A genuine
- * judge-call failure (content WAS available, judgeJob itself threw or
- * returned unparseable output) is NOT transient and resolves normally as a
- * safe 'skip' verdict — UNLESS the failure was a deliberate shutdown abort
- * (`signal.aborted`), which must not write any row at all. */
-export async function processJudgeJob(jobId: string, sourceUrl: string, signal?: AbortSignal): Promise<void> {
+export async function processJudgeJob(jobId: string, sourceUrl: string, signal?: AbortSignal): Promise<{ triggeredApply: boolean; applyJobId?: string }> {
   const db = getDb()
   const existing = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.id, jobId))
   if (existing.length > 0) {
     pushLog(JUDGE_TAB, `Job ${jobId} already recorded — skipping (duplicate delivery).`)
-    return
+    // Can't recover a prior run's apply job id here — apply-queues.ts
+    // deliberately has no deterministic jobId (see its enqueueApplyJob) — so
+    // this duplicate-delivery path (a resume after crash) doesn't gate the
+    // scraper on whatever apply job an earlier run may have triggered.
+    return { triggeredApply: false }
   }
 
   const contentRows = await db.select({ content: jobContents.content }).from(jobContents).where(eq(jobContents.jobId, jobId))
@@ -109,13 +102,10 @@ export async function processJudgeJob(jobId: string, sourceUrl: string, signal?:
     throw new Error(`judge: no scraped content for job ${jobId} yet`)
   }
 
-  if (signal?.aborted) return
+  if (signal?.aborted) return { triggeredApply: false }
 
   const applyUrl = `https://www.linkedin.com/jobs/view/${jobId}/`
   pushLog(JUDGE_TAB, `Judging job ${jobId}… (${content.length} chars)`)
-  // Carry the live queue depth in the per-job line — otherwise this write
-  // clobbers updateCombinedStatus's count on the same tab and the sidebar
-  // shows only the current id with no idea how much is left.
   const counts = await getJudgeQueueCounts().catch(() => ({ waiting: 0, active: 0 }))
   setAgentStatus(JUDGE_TAB, 'running', `${counts.waiting} waiting (judging ${jobId})`)
 
@@ -123,7 +113,7 @@ export async function processJudgeJob(jobId: string, sourceUrl: string, signal?:
   try {
     verdict = await judgeJob(content, resolveModel(getCurrentConfig(), appState.settings.model, 'judge'), signal)
   } catch (err) {
-    if (signal?.aborted) return
+    if (signal?.aborted) return { triggeredApply: false }
     logger.error({ err, jobId }, 'judge: relevance judge failed')
     verdict = {
       title: 'Unknown',
@@ -136,8 +126,9 @@ export async function processJudgeJob(jobId: string, sourceUrl: string, signal?:
     }
   }
 
-  if (signal?.aborted) return
-  await recordJudgeVerdict(jobId, sourceUrl, applyUrl, verdict)
+  if (signal?.aborted) return { triggeredApply: false }
+  const { applyJob } = await recordJudgeVerdict(jobId, sourceUrl, applyUrl, verdict)
+  return { triggeredApply: applyJob !== undefined, applyJobId: applyJob?.id }
 }
 
 let worker: Worker | null = null
@@ -162,7 +153,7 @@ export function startJudgeWorker(): void {
       const abort = new AbortController()
       activeAborts.add(abort)
       try {
-        await processJudgeJob(job.data.jobId, job.data.sourceUrl, abort.signal)
+        return await processJudgeJob(job.data.jobId, job.data.sourceUrl, abort.signal)
       } finally {
         activeAborts.delete(abort)
       }

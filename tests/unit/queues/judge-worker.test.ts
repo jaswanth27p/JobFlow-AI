@@ -23,7 +23,7 @@ initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs
 let judgeJobResult: JobJudgeVerdict | null = null
 
 beforeEach(() => {
-  mock.module('../../../src/queues/apply-queues.ts', () => ({ enqueueApplyJob: async () => {} }))
+  mock.module('../../../src/queues/apply-queues.ts', () => ({ enqueueApplyJob: async () => ({ id: 'fake-apply-job-id' }) }))
   mock.module('../../../src/notify/summary-aggregator.ts', () => ({ recordExternalJobFound: () => {} }))
   mock.module('../../../src/config/current.ts', () => ({
     getCurrentConfig: () => ({ models: {} }),
@@ -76,7 +76,8 @@ describe('processJudgeJob', () => {
       })
       .onConflictDoNothing()
 
-    await processJudgeJob('judge-worker-test-dup', SOURCE_URL)
+    const result = await processJudgeJob('judge-worker-test-dup', SOURCE_URL)
+    expect(result).toEqual({ triggeredApply: false })
     expect(appState.tabs.judge.logs.some((l) => l.includes('already recorded'))).toBe(true)
 
     await db.delete(jobs).where(eq(jobs.id, 'judge-worker-test-dup'))
@@ -105,7 +106,8 @@ describe('processJudgeJob', () => {
       reason: 'Good fit.',
     }
 
-    await processJudgeJob(jobId, SOURCE_URL)
+    const result = await processJudgeJob(jobId, SOURCE_URL)
+    expect(result).toEqual({ triggeredApply: true, applyJobId: 'fake-apply-job-id' })
 
     const rows = await db.select().from(jobs).where(eq(jobs.id, jobId))
     expect(rows).toHaveLength(1)
@@ -122,7 +124,7 @@ describe('processJudgeJob', () => {
     // judgeJobResult stays null — the mocked judgeJob (see beforeEach above)
     // throws in that case, exercising processJudgeJob's catch branch.
 
-    await expect(processJudgeJob(jobId, SOURCE_URL)).resolves.toBeUndefined()
+    await expect(processJudgeJob(jobId, SOURCE_URL)).resolves.toEqual({ triggeredApply: false })
 
     const rows = await db.select().from(jobs).where(eq(jobs.id, jobId))
     expect(rows).toHaveLength(1)

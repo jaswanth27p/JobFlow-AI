@@ -21,14 +21,12 @@ export const appConfigSchema = z.object({
    * trusted as already-filtered by its own LinkedIn search params. */
   requirements: z.string().min(1),
   concurrency: z.number().positive().default(1),
-  /** Parallel LLM relevance-judge calls (job-judge queue). No browser is
-   * involved in this stage at all — see docs/superpowers/specs/
-   * 2026-09-18-judge-scrape-split-design.md — so this is purely how many
-   * concurrent judgeJob() calls run at once. Default 10, capped at 10 mainly
-   * as a sane ceiling on concurrent LLM requests, not a resource limit. The
-   * browser-driven scrape stage that feeds this queue has no concurrency
-   * knob at all (always 1) — see scrape-worker.ts. Live-tunable via
-   * /set judgeConcurrency. */
+  /** No-op, kept only so existing linkedin-auto.config.ts files with this
+   * field still parse — same treatment as urlGroups[].scanFullList below.
+   * The single-tab sequential pipeline design
+   * (docs/superpowers/specs/2026-09-19-single-tab-sequential-pipeline-design.md)
+   * hardcodes the judge queue to `concurrency: 1` (judge-worker.ts) since only
+   * one job is ever in flight through the pipeline at a time. */
   judgeConcurrency: z.number().int().min(1).max(10).default(10),
   /** Default/fallback model — used by any agent kind not given an explicit
    * override in `models` below. Also the value /set model edits live at
@@ -66,12 +64,7 @@ export const appConfigSchema = z.object({
     // search-agent.ts for the per-URL pagination stop condition instead.
     minNavDelayMs: z.number().int().min(0).default(3000),
     maxNavDelayMs: z.number().int().min(0).default(8000),
-    /** Minimum pause between full /auto-on loop cycles (re-scanning the same
-     * configured URLs). Without this, loop mode reopens the same search
-     * results back-to-back nonstop — a real LinkedIn rate-limit/ban risk,
-     * unlike /auto-on interval which already waits the full interval. */
-    loopCooldownMs: z.number().int().min(60_000).default(300_000),
-  }).default({ minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300_000 }),
+  }).default({ minNavDelayMs: 3000, maxNavDelayMs: 8000 }),
 })
 
 export type AppConfig = z.infer<typeof appConfigSchema>

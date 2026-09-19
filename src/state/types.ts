@@ -16,14 +16,10 @@ export interface SessionStatus {
 
 export interface Settings {
   concurrency: number
-  /** Parallel judge-queue LLM calls (no browser involved). */
-  judgeConcurrency: number
   model: string
   /** Lower/upper bounds of the randomized pause after each browser navigation. */
   minNavDelayMs: number
   maxNavDelayMs: number
-  /** Minimum pause between full /auto-on loop cycles. */
-  loopCooldownMs: number
 }
 
 export interface AppState {

@@ -120,11 +120,9 @@ async function main() {
 
   initAppState({
     concurrency: config.concurrency,
-    judgeConcurrency: config.judgeConcurrency,
     model: config.model,
     minNavDelayMs: config.search.minNavDelayMs,
     maxNavDelayMs: config.search.maxNavDelayMs,
-    loopCooldownMs: config.search.loopCooldownMs,
   })
 
   registerBuiltinCommands()

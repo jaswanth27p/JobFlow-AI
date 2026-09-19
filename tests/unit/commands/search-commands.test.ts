@@ -18,13 +18,13 @@ function makeConfig(): AppConfig {
     autoFocusTabs: true,
     profileFiles: { resume: './resume.md', profile: './profile.json' },
     extraPrompts: { search: '', easyApply: '' },
-    search: { minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 },
+    search: { minNavDelayMs: 3000, maxNavDelayMs: 8000 },
   }
 }
 
 beforeEach(() => {
   clearRegistryForTest()
-  initAppState({ concurrency: 1, judgeConcurrency: 3, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+  initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000 })
   setCurrentConfig(makeConfig())
   registerSearchCommands()
 })

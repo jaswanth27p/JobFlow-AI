@@ -6,7 +6,7 @@ import { initAppState, appState } from '../../../src/state/app-state.ts'
 import { processJudgeJob, recordJudgeVerdict } from '../../../src/queues/judge-worker.ts'
 import type { JobJudgeVerdict } from '../../../src/agents/job-relevance-judge.ts'
 
-initAppState({ concurrency: 1, judgeConcurrency: 3, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000 })
 
 // enqueueApplyJob (apply-queues.ts) opens a real ioredis connection as a side
 // effect of module load / first call — mocked out so this file's DB-only

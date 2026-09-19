@@ -122,7 +122,7 @@ async function runLoop(): Promise<void> {
     // Cooldown between full cycles — without this, loop mode reopens the same
     // search URLs back-to-back nonstop, which reads as bot behavior to
     // LinkedIn (real rate-limit/ban risk). Abortable so /auto-off is instant.
-    const cooldownMs = Math.max(60_000, appState.settings.loopCooldownMs)
+    const cooldownMs = 300_000 // 5 minutes
     pushLog(SEARCH_TAB, `Auto mode: cycle finished — next loop cycle in ~${formatDuration(cooldownMs)}.`)
     loopCooldownAbort = new AbortController()
     await sleep(cooldownMs, loopCooldownAbort.signal)

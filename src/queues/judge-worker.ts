@@ -147,13 +147,13 @@ export function isJudgeWorkerRunning(): boolean {
   return worker !== null
 }
 
-/** One BullMQ Worker, `concurrency: judgeConcurrency` — real parallel LLM
- * calls, no browser, no per-value Chrome process. This works safely at N > 1
- * because judgeJob() builds a fresh Agent per call (job-relevance-judge.ts)
- * and processJudgeJob has no shared mutable state between concurrent
- * invocations to race on — unlike the browser stage, which is why THAT one
- * (scrape-worker.ts) is hardcoded to concurrency 1. */
-export function startJudgeWorker(n: number = appState.settings.judgeConcurrency): void {
+/** One BullMQ Worker, `concurrency: 1` — hardcoded, no knob. The single-tab
+ * sequential pipeline design (docs/superpowers/specs/
+ * 2026-09-19-single-tab-sequential-pipeline-design.md) never has more than
+ * one job in flight through the whole pipeline at a time, so parallel judge
+ * calls have no work to overlap with anymore — see scrape-worker.ts's
+ * await-judge-then-apply gating, which is what enforces that. */
+export function startJudgeWorker(): void {
   if (worker) return
 
   worker = new Worker(
@@ -167,19 +167,17 @@ export function startJudgeWorker(n: number = appState.settings.judgeConcurrency)
         activeAborts.delete(abort)
       }
     },
-    { connection: getRedisConnectionOptions(), concurrency: Math.max(1, Math.floor(n)) },
+    { connection: getRedisConnectionOptions(), concurrency: 1 },
   )
 
   worker.on('failed', (_job, err) => {
     pushLog(JUDGE_TAB, `Judge worker error: ${err.message}`)
   })
-  // Required: an EventEmitter with no 'error' listener throws on emit, which
-  // would otherwise crash the process on a Redis connection hiccup.
   worker.on('error', (err) => {
     pushLog(JUDGE_TAB, `Judge worker connection error: ${err.message}`)
   })
 
-  pushLog(JUDGE_TAB, `Judge queue worker started (concurrency ${Math.max(1, Math.floor(n))}).`)
+  pushLog(JUDGE_TAB, 'Judge queue worker started.')
   setAgentStatus(JUDGE_TAB, 'running', 'starting…')
   void getJudgeQueueCounts()
     .then((c) => setAgentStatus(JUDGE_TAB, 'running', `${c.waiting} waiting in queue`))

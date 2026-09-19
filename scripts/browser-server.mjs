@@ -93,7 +93,7 @@ process.stderr.write(`[browser-server] browser launched\n`)
 // Node process exit on its own — Playwright's launchPersistentContext just
 // leaves this HTTP server up with a dead browser underneath it, so every
 // later /cdp-url etc. keeps handing out a port nothing listens on anymore.
-// The parent process (session.ts / easy-apply-session.ts) only detects a
+// The parent process (session.ts) only detects a
 // crash via THIS process's own exit, so without this listener that
 // detection never fires and callers are stuck retrying a dead CDP port
 // forever. Exiting here is what makes that existing crash-detection work.
@@ -185,7 +185,9 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/cookies') {
       // Live cookies straight from this browser's current session — unlike
       // /state, this does NOT write to STORAGE_STATE_PATH. Used to seed a
-      // second, independent browser instance (see easy-apply-session.ts) with
+      // second, independent browser instance (a pattern this project no
+      // longer uses — search/scrape/easy-apply all share the bootstrap
+      // browser now, see src/browser/pipeline-tab.ts) with
       // whatever login this one has RIGHT NOW, without waiting for a clean
       // shutdown to persist it to disk first.
       const cookies = await browser.cookies()

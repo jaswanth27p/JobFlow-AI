@@ -4,8 +4,6 @@ import { setCurrentConfig } from './config/current.ts'
 import { loadResume, loadProfile } from './profile/loader.ts'
 import { getDb, closeDb } from './db/index.ts'
 import { launchBootstrapBrowser, openLoginTabs, shutdownBrowserServer } from './browser/session.ts'
-import { shutdownEasyApplyBrowser } from './browser/easy-apply-session.ts'
-import { shutdownScrapeBrowser } from './browser/scrape-session.ts'
 import { startLoginAutoVerify, stopLoginAutoVerify } from './browser/verify-login.ts'
 import { initAppState } from './state/app-state.ts'
 import { registerBuiltinCommands } from './commands/index.ts'
@@ -63,12 +61,10 @@ async function cleanup() {
   await closeApplyQueues()
   await closeJudgeQueues()
   await closeScrapeQueues()
-  // easy-apply's and the scrape worker's own dedicated browsers (see
-  // easy-apply-session.ts / scrape-session.ts) — both no-ops if never
-  // launched this session (lazy, only on first use of each). The judge
-  // worker has no browser of its own — LLM-only, see judge-worker.ts.
-  await shutdownEasyApplyBrowser()
-  await shutdownScrapeBrowser()
+  // Search, scrape, and easy-apply all share the one bootstrap browser now
+  // (see src/browser/pipeline-tab.ts) — there are no separate dedicated
+  // browsers left to shut down here. The judge worker has no browser of its
+  // own either — LLM-only, see judge-worker.ts.
   await shutdownBrowserServer()
   await closeDb()
 }

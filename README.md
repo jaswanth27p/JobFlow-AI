@@ -116,10 +116,9 @@ export default {
     Avoid roles requiring more than 8 years of experience.
   `,
   concurrency: 1,                     // Reserved for future use; the easy-apply worker always runs at concurrency 1.
-  judgeConcurrency: 10,               // Parallel LLM relevance-judge calls (1-10, default 10) — no browser
-                                      // involved in this stage, just concurrent LLM requests. The browser stage
-                                      // that fetches job content always runs serially (no knob) to avoid
-                                      // LinkedIn rate limiting. Live-tunable via /set.
+  judgeConcurrency: 10,               // No-op — the single-tab sequential pipeline always scrapes, judges,
+                                      // and applies exactly one job at a time. Kept only so this file's
+                                      // shape still matches AppConfig.
   profileFiles: {
     resume: './resume.md',
     profile: './profile.json',
@@ -137,14 +136,13 @@ export default {
   search: {
     minNavDelayMs: 3000,              // Randomized human-like pause after each browser navigation…
     maxNavDelayMs: 8000,              // …between these two bounds (LinkedIn rate-limit guard).
-    loopCooldownMs: 300000,           // Minimum pause between full /auto-on loop cycles.
   },
 }
 ```
 
 There is no cap on jobs scanned per run — a search URL stops being paginated when its result relevance ratio drops too low or it runs out of pages (unless `scanFullList: true`, which always scans to the end), not after a fixed count.
 
-The default `model`, `concurrency`, `judgeConcurrency`, and every `search.*` number can be changed at runtime without restarting, via `/set model <name>`, `/set judgeConcurrency 5`, `/set minNavDelayMs <ms>`, etc. Changing `judgeConcurrency` while the judge queue is running restarts the (LLM-only) judge worker at the new concurrency immediately — in-flight judge calls are aborted; the job's content stays in `job_contents` and is picked up again on the next attempt. `judgeConcurrency` has no effect on the separate scrape stage, which always runs one browser at a time and has no concurrency setting. Everything else in this file — `urlGroups`, `models` (per-agent overrides), `requirements`, `extraPrompts`, `notifySummaryIntervalMinutes` — needs either a restart (`bun start`) or `/reload-config` to pick up an edit. `resume.md` and `profile.json` are the exception: both are re-read from disk on every job/scan, so edits to those two files apply immediately with no restart or reload needed.
+The default `model`, `concurrency`, and `search.minNavDelayMs`/`maxNavDelayMs` can be changed at runtime without restarting, via `/set model <name>`, `/set minNavDelayMs <ms>`, etc. `judgeConcurrency` is a config-file-only no-op now (the whole pipeline — scrape, judge, and easy-apply — always processes exactly one job at a time; see the single-tab sequential pipeline design). Everything else in this file — `urlGroups`, `models` (per-agent overrides), `requirements`, `extraPrompts`, `notifySummaryIntervalMinutes` — needs either a restart (`bun start`) or `/reload-config` to pick up an edit. `resume.md` and `profile.json` are the exception: both are re-read from disk on every job/scan, so edits to those two files apply immediately with no restart or reload needed.
 
 ### `profile.json`
 
@@ -182,14 +180,14 @@ Once `/verify-login` succeeds, every command below is available. Commands are sc
 | `/verify-login` | global | Check LinkedIn/Gmail login status; unlocks the app once LinkedIn passes |
 | `/tab [search\|easy\|scrape\|judge]` | global | Switch the active tab (no arg opens a picker) |
 | `/theme [name]` | global | Switch color theme (no arg opens a picker) |
-| `/set <setting> <value>` | global | Change a runtime setting (`concurrency`, `judgeConcurrency`, `model`, `minNavDelayMs`, `maxNavDelayMs`, `loopCooldownMs`) without restarting |
+| `/set <setting> <value>` | global | Change a runtime setting (`concurrency`, `model`, `minNavDelayMs`, `maxNavDelayMs`) without restarting |
 | `/reload-config` | global | Re-read `linkedin-auto.config.ts` (url groups, per-agent models, prompts, requirements) without restarting |
 | `/help` | global | List commands available on the current tab |
 | `/exit` | global | Close the browser and quit (`Ctrl+Q` also works) |
 | `/search-urls` | search | Pick a `urlGroups` group (or "All groups") and run it |
 | `/stop-search` | search | Stop an in-progress search run |
-| `/auto-on loop` / `/auto-on interval <1h30m>` | search | Pick a `urlGroups` group (or "All groups"), repeatedly run it, and keep the Easy Apply worker started |
-| `/auto-off` | search | Stop the auto-mode loop/interval |
+| `/auto-on <duration>` (e.g. `1h30m`) | search | Pick a `urlGroups` group (or "All groups"); each cycle runs a full search, then scrapes/judges/applies everything it found one job at a time (a match holds scraping and applies immediately), then waits out (or skips, if the cycle overran) the rest of `<duration>` before the next cycle |
+| `/auto-off` | search | Stop scheduling further cycles (the in-flight cycle, and its easy-apply/judge workers, keep running to completion) |
 | `/process-easy-queue` | easy | Start working through queued Easy Apply jobs |
 | `/stop-easy-queue` | easy | Stop the Easy Apply worker |
 

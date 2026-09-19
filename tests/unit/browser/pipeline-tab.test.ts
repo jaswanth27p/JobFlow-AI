@@ -1,4 +1,4 @@
-import { describe, test, expect, mock, beforeEach } from 'bun:test'
+import { describe, test, expect, mock, beforeEach, afterAll } from 'bun:test'
 
 const calls: string[] = []
 let nextNavigateThrows: Error | null = null
@@ -26,6 +26,20 @@ mock.module('../../../src/browser/tab-guard.ts', () => ({
   isBrowserConnectionError: () => false,
   isOwnedTabGoneError: (err: unknown) => err instanceof Error && err.message.includes('no longer exists'),
 }))
+
+// Bun's mock.module is process-global and leaks into later test files, so
+// both mocked modules must be restored here — tests/unit/browser/tab-guard.test.ts
+// (and anything importing session.ts's other exports) would otherwise get
+// these partial stubs instead of the real modules when the full suite runs.
+afterAll(async () => {
+  const sessionSpecifier = '../../../src/browser/session.ts?__restore_real_pipeline_tab_test'
+  const sessionReal = await import(sessionSpecifier)
+  mock.module('../../../src/browser/session.ts', () => ({ ...sessionReal }))
+
+  const tabGuardSpecifier = '../../../src/browser/tab-guard.ts?__restore_real_pipeline_tab_test'
+  const tabGuardReal = await import(tabGuardSpecifier)
+  mock.module('../../../src/browser/tab-guard.ts', () => ({ ...tabGuardReal }))
+})
 
 beforeEach(() => {
   calls.length = 0

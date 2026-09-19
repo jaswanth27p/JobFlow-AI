@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { eq, inArray } from 'drizzle-orm'
-import { noopLogger } from '@mastra/core/logger'
-import { AgentBrowser } from '@mastra/agent-browser'
+import type { AgentBrowser } from '@mastra/agent-browser'
 import type { Page } from 'playwright-core'
-import { getSharedCdpUrl } from '../browser/session.ts'
-import { openOwnTab, navigateOwnTab, reclaimOwnTab, isBrowserConnectionError, isOwnedTabGoneError, type OwnedTab } from '../browser/tab-guard.ts'
+import { getPipelineBrowser, ensurePipelineTab } from '../browser/pipeline-tab.ts'
+import { reclaimOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, jobContents, searchRuns } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -53,45 +52,6 @@ function randomNavDelayMs(): number {
   const min = Math.max(0, appState.settings.minNavDelayMs)
   const max = Math.max(min, appState.settings.maxNavDelayMs)
   return min + Math.floor(Math.random() * (max - min + 1))
-}
-
-let sharedBrowser: AgentBrowser | null = null
-
-function getSearchBrowser(): AgentBrowser {
-  if (!sharedBrowser) {
-    sharedBrowser = new AgentBrowser({ cdpUrl: getSharedCdpUrl(), scope: 'shared', headless: false })
-    // AgentBrowser has its own ConsoleLogger — without this, tool-level errors
-    // (e.g. a Playwright navigation timeout) still write raw ANSI text to
-    // stdout and corrupt the opentui TUI frame.
-    sharedBrowser.__setLogger(noopLogger)
-  }
-  return sharedBrowser
-}
-
-/** The one tab the scan loop ever has open — reused across every configured
- * URL (navigate in place) instead of opening a new one and closing it per
- * URL. See navigateOwnTab's doc comment (tab-guard.ts) for why: closeOwnTab
- * is best-effort and a missed close used to leave a stray tab behind forever,
- * one per URL scanned. */
-let searchTab: OwnedTab | null = null
-
-async function ensureSearchTab(browser: AgentBrowser, cdpUrl: string, url: string, matchFragment: string): Promise<OwnedTab> {
-  if (searchTab) {
-    try {
-      searchTab = await navigateOwnTab(browser, cdpUrl, searchTab, url, matchFragment)
-      return searchTab
-    } catch (err) {
-      // Only a genuinely-gone tab (or dead browser) warrants abandoning it and
-      // opening a new one — a plain nav failure (offline, DNS, timeout) means
-      // the tab is still there, so reopening would leak it. See
-      // isOwnedTabGoneError's doc comment (tab-guard.ts) for the full story.
-      if (!isBrowserConnectionError(err) && !isOwnedTabGoneError(err)) throw err
-      logger.warn({ err }, 'search: could not reuse existing tab, opening a fresh one')
-      searchTab = null
-    }
-  }
-  searchTab = await openOwnTab(browser, cdpUrl, url, matchFragment)
-  return searchTab
 }
 
 let activeAbort: AbortController | null = null
@@ -454,10 +414,9 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
   await db.insert(searchRuns).values({ id: runId, urlsTried: [] })
 
   const ctx: ScanRunContext = { signal: abort.signal, totalIdsSeen: 0, alreadySeen: 0, queuedForScrape: 0 }
-  const cdpUrl = getSharedCdpUrl()
 
   try {
-    const browser = getSearchBrowser()
+    const { browser, cdpUrl } = getPipelineBrowser()
     const triedUrls: string[] = []
 
     for (const entry of entries) {
@@ -476,7 +435,7 @@ async function runSearchUrlsInner(entries: ScanUrlEntry[]): Promise<SearchRunRes
       // runs) — navigated in place, never closed between URLs.
       let ownTab: OwnedTab
       try {
-        ownTab = await ensureSearchTab(browser, cdpUrl, entry.url, '/jobs/search')
+        ownTab = await ensurePipelineTab(entry.url, '/jobs/search')
       } catch (err) {
         pushLog(SEARCH_TAB, `Could not open ${entry.url}: ${summarizeError(err)} — skipping.`)
         logger.error({ err, url: entry.url }, 'search: failed to open tab')

@@ -22,10 +22,11 @@ import { getCurrentConfig } from '../config/current.ts'
  * problem tab-guard.ts otherwise guards against, so it can't make that
  * problem worse.
  *
- * Keyed by cdpUrl (not a single global) — the search agent and easy-apply
- * can each be talking to a DIFFERENT real browser process (see
- * easy-apply-session.ts), so a connection to one must never be used to look
- * for a tab that lives in the other.
+ * Keyed by cdpUrl rather than a single global — search, scrape, and
+ * easy-apply now all share the one bootstrap browser (see
+ * src/browser/pipeline-tab.ts), so in practice there is only ever one entry,
+ * but this still protects against ever mixing up a connection to the wrong
+ * browser process.
  */
 const focusBrowsers = new Map<string, Browser>()
 const connecting = new Map<string, Promise<Browser>>()

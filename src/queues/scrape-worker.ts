@@ -1,13 +1,13 @@
 import { Worker, type Job } from 'bullmq'
 import { eq } from 'drizzle-orm'
-import { noopLogger } from '@mastra/core/logger'
-import { AgentBrowser } from '@mastra/agent-browser'
+import type { AgentBrowser } from '@mastra/agent-browser'
 import { getRedisConnectionOptions } from './connection.ts'
-import { enqueueJudgeJob } from './judge-queues.ts'
+import { enqueueJudgeJob, getJudgeQueueEvents } from './judge-queues.ts'
 import { getScrapeQueueCounts } from './scrape-queues.ts'
-import { getScrapeCdpUrl, invalidateScrapeCdpUrl } from '../browser/scrape-session.ts'
-import { openOwnTab, navigateOwnTab, closeStrayTabs, isBrowserConnectionError, isOwnedTabGoneError, type OwnedTab } from '../browser/tab-guard.ts'
+import { getApplyJobByQueueId, getApplyQueueEvents } from './apply-queues.ts'
+import { getPipelineBrowser, ensurePipelineTab } from '../browser/pipeline-tab.ts'
 import { waitForNetwork } from '../utils/network.ts'
+import { getCurrentConfig } from '../config/current.ts'
 import { getDb } from '../db/index.ts'
 import { jobContents } from '../db/schema.ts'
 import { pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -40,88 +40,26 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-let sharedBrowser: AgentBrowser | null = null
-let sharedBrowserCdpUrl: string | null = null
-
-/** Launches (on first call) or reuses the scrape worker's own dedicated
- * browser — see scrape-session.ts for why this is a separate Chrome process,
- * and why there is only ever one (no slot/pool model). */
-async function getScrapeBrowser(): Promise<{ browser: AgentBrowser; cdpUrl: string }> {
-  // Re-fetching getScrapeCdpUrl() on every call (not just when sharedBrowser
-  // was never set) is what lets this layer notice a relaunch — see
-  // easy-apply-agent.ts's getEasyApplyBrowser, which this mirrors.
-  const cdpUrl = await getScrapeCdpUrl()
-  if (!sharedBrowser || sharedBrowserCdpUrl !== cdpUrl) {
-    sharedBrowser = new AgentBrowser({
-      cdpUrl,
-      scope: 'shared',
-      headless: false,
-      excludeTools: ['browser_screenshot', 'browser_tabs'],
-    })
-    sharedBrowser.__setLogger(noopLogger)
-    sharedBrowserCdpUrl = cdpUrl
-    scrapeTab = null
-  }
-  return { browser: sharedBrowser, cdpUrl: sharedBrowserCdpUrl }
-}
-
-function resetScrapeBrowser(staleCdpUrl: string): void {
-  invalidateScrapeCdpUrl(staleCdpUrl)
-  sharedBrowser = null
-  sharedBrowserCdpUrl = null
-  scrapeTab = null
-}
-
-/** The one tab this worker ever has open — reused across every job (navigate
- * in place) instead of opening a new one and closing it per job. */
-let scrapeTab: OwnedTab | null = null
-
-async function ensureScrapeTab(browser: AgentBrowser, cdpUrl: string, url: string, matchFragment: string): Promise<OwnedTab> {
-  if (scrapeTab) {
-    try {
-      scrapeTab = await navigateOwnTab(browser, cdpUrl, scrapeTab, url, matchFragment)
-      return scrapeTab
-    } catch (err) {
-      if (!isBrowserConnectionError(err) && !isOwnedTabGoneError(err)) throw err
-      logger.warn({ err }, 'scrape: could not reuse existing tab, opening a fresh one')
-      scrapeTab = null
-    }
-  }
-  scrapeTab = await openOwnTab(browser, cdpUrl, url, matchFragment)
-  // The scrape browser is dedicated to this one job at a time — anything
-  // other than the tab we just opened is a stray (an earlier tab a redirect
-  // took off its matchFragment, or the initial blank tab).
-  await closeStrayTabs(browser, matchFragment)
-  return scrapeTab
-}
-
-interface AcquiredScrapeTab {
-  browser: AgentBrowser
-  cdpUrl: string
-  tab: OwnedTab
-}
-
-async function acquireScrapeTab(jobId: string, applyUrl: string): Promise<AcquiredScrapeTab> {
-  const matchFragment = `/jobs/view/${jobId}`
-  let { browser, cdpUrl } = await getScrapeBrowser()
-  try {
-    const tab = await ensureScrapeTab(browser, cdpUrl, applyUrl, matchFragment)
-    return { browser, cdpUrl, tab }
-  } catch (err) {
-    if (!isBrowserConnectionError(err)) throw err
-    logger.warn({ err, jobId }, 'scrape: browser connection is dead — forcing relaunch and retrying once')
-    resetScrapeBrowser(cdpUrl)
-    ;({ browser, cdpUrl } = await getScrapeBrowser())
-    const tab = await ensureScrapeTab(browser, cdpUrl, applyUrl, matchFragment)
-    return { browser, cdpUrl, tab }
-  }
+/** Randomized human-like pause between consecutive job page loads — jitter
+ * matters, a fixed cadence is itself a bot signal (mirrors search-agent.ts's
+ * randomNavDelayMs). Read live off config.search rather than cached at
+ * startup, so /reload-config picks up new bounds without a restart. There is
+ * no dedicated `scrape` config section — this reuses the same nav-delay
+ * bounds the search stage's own browser navigations use, since both are
+ * "how long to pause between LinkedIn page loads" and config.search is the
+ * only place those bounds are configured. */
+function randomScrapeDelayMs(): number {
+  const { minNavDelayMs, maxNavDelayMs } = getCurrentConfig().search
+  const min = Math.max(0, minNavDelayMs)
+  const max = Math.max(min, maxNavDelayMs)
+  return min + Math.floor(Math.random() * (max - min + 1))
 }
 
 /** Reads the currently-open job detail page. Returns '' on a transient read
  * failure (empty snapshot, thrown error) — the caller must NOT write a
  * job_contents row for that case, so the id stays retryable via BullMQ
  * backoff instead of being falsely marked scraped. */
-async function readJobText(jobId: string, browser: AgentBrowser, cdpUrl: string, signal?: AbortSignal): Promise<string> {
+async function readJobText(jobId: string, browser: AgentBrowser, signal?: AbortSignal): Promise<string> {
   let jobText = ''
   try {
     for (let attempt = 0; attempt < DETAIL_PANE_MAX_ATTEMPTS; attempt++) {
@@ -153,7 +91,6 @@ async function readJobText(jobId: string, browser: AgentBrowser, cdpUrl: string,
       )
     }
   } catch (err) {
-    if (isBrowserConnectionError(err)) resetScrapeBrowser(cdpUrl)
     logger.error({ err, jobId }, 'scrape: failed to read job detail pane')
     pushLog(SCRAPE_TAB, `Could not load job ${jobId} — will retry. (${summarizeError(err)})`)
     return ''
@@ -161,19 +98,52 @@ async function readJobText(jobId: string, browser: AgentBrowser, cdpUrl: string,
   return jobText
 }
 
+/** Enqueues the judge job for a scraped id and BLOCKS until it (and, if it
+ * turns out to be an easy-apply match, the apply job it triggers) is fully
+ * finished — this is what makes the scrape queue's own concurrency:1 refuse
+ * to pull the next scrape job until the current one's judge/apply chain has
+ * resolved. See docs/superpowers/specs/
+ * 2026-09-19-single-tab-sequential-pipeline-design.md's Sequencing section.
+ * A judge/apply job that itself ultimately fails (exhausts its own BullMQ
+ * retries) is logged and treated as "nothing more to wait for" rather than
+ * thrown — that failure is already recorded by that stage; scraping should
+ * still move on to the next job. */
+async function waitForJudgeAndApply(jobId: string, sourceUrl: string): Promise<void> {
+  const judgeJobHandle = await enqueueJudgeJob(jobId, sourceUrl)
+  let applyJobId: string | undefined
+  try {
+    const result = (await judgeJobHandle.waitUntilFinished(getJudgeQueueEvents())) as
+      | { triggeredApply?: boolean; applyJobId?: string }
+      | undefined
+    if (result?.triggeredApply) applyJobId = result.applyJobId
+  } catch (err) {
+    logger.warn({ err, jobId }, 'scrape: judge job did not finish cleanly — continuing to the next scrape job')
+    return
+  }
+
+  if (!applyJobId) return
+
+  const applyJobHandle = await getApplyJobByQueueId(applyJobId)
+  if (!applyJobHandle) return
+  try {
+    await applyJobHandle.waitUntilFinished(getApplyQueueEvents())
+  } catch (err) {
+    logger.warn({ err, jobId }, 'scrape: apply job did not finish cleanly — continuing to the next scrape job')
+  }
+}
+
 /** Fetches one queued job's detail-page content and hands it off to the judge
- * stage: re-checks for a duplicate delivery (job_contents already has this
- * id — the browser step is skipped entirely, only the judge-queue enqueue
- * runs, which is itself an idempotent no-op via BullMQ's jobId dedupe), waits
- * out any connectivity outage, opens the detail page directly, persists the
- * content, and enqueues it for judging. A transient failure (tab wouldn't
- * open, detail pane wouldn't read) throws so BullMQ retries with backoff
- * instead of the job silently vanishing on one bad attempt. */
+ * stage, holding this scrape job open until judge (and any apply it
+ * triggers) has fully finished — see waitForJudgeAndApply. Re-checks for a
+ * duplicate delivery (job_contents already has this id — the browser step is
+ * skipped entirely). A transient failure (tab wouldn't open, detail pane
+ * wouldn't read) throws so BullMQ retries with backoff instead of the job
+ * silently vanishing on one bad attempt. */
 export async function processScrapeJob(jobId: string, sourceUrl: string, signal?: AbortSignal): Promise<void> {
   const db = getDb()
   const existing = await db.select({ jobId: jobContents.jobId }).from(jobContents).where(eq(jobContents.jobId, jobId))
   if (existing.length > 0) {
-    await enqueueJudgeJob(jobId, sourceUrl)
+    await waitForJudgeAndApply(jobId, sourceUrl)
     return
   }
 
@@ -186,16 +156,11 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
   // same tab), leaving the sidebar showing only the current id with no sense
   // of how much work is left.
   const counts = await getScrapeQueueCounts()
-  setAgentStatus(
-    SCRAPE_TAB,
-    'running',
-    `${counts.waiting} waiting (fetching ${jobId})`,
-  )
+  setAgentStatus(SCRAPE_TAB, 'running', `${counts.waiting} waiting (fetching ${jobId})`)
 
-  let browser: AgentBrowser
-  let cdpUrl: string
+  const { browser } = getPipelineBrowser()
   try {
-    ;({ browser, cdpUrl } = await acquireScrapeTab(jobId, applyUrl))
+    await ensurePipelineTab(applyUrl, `/jobs/view/${jobId}`)
   } catch (err) {
     logger.error({ err, jobId }, 'scrape: failed to open job tab')
     pushLog(SCRAPE_TAB, `Could not open job ${jobId} — will retry. (${summarizeError(err)})`)
@@ -203,15 +168,15 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
   }
 
   if (signal?.aborted) return
-  const jobText = await readJobText(jobId, browser, cdpUrl, signal)
+  const jobText = await readJobText(jobId, browser, signal)
   if (signal?.aborted) return
   if (!jobText) {
     throw new Error(`scrape: could not read job ${jobId}'s detail page`)
   }
 
   await db.insert(jobContents).values({ jobId, sourceUrl, content: jobText }).onConflictDoNothing()
-  await enqueueJudgeJob(jobId, sourceUrl)
   pushLog(SCRAPE_TAB, `Job ${jobId} fetched (${jobText.length} chars) — queued for judging.`)
+  await waitForJudgeAndApply(jobId, sourceUrl)
 }
 
 let worker: Worker | null = null
@@ -221,10 +186,12 @@ export function isScrapeWorkerRunning(): boolean {
   return worker !== null
 }
 
-/** Exactly one BullMQ Worker, `concurrency: 1` — hardcoded, no knob. See the
- * design doc's Problem section for why this must never be raised: parallel
+/** Exactly one BullMQ Worker, `concurrency: 1` — hardcoded, no knob. Parallel
  * Chrome navigations on this account are what got LinkedIn to throttle in
- * the first place. */
+ * the first place (see docs/superpowers/specs/2026-09-18-judge-scrape-split-design.md),
+ * and this worker's own processor now blocks until judge+apply for the
+ * current job are done too (see waitForJudgeAndApply) — concurrency above 1
+ * would defeat that gating entirely. */
 export function startScrapeWorker(): void {
   if (worker) return
 
@@ -237,6 +204,11 @@ export function startScrapeWorker(): void {
         await processScrapeJob(job.data.jobId, job.data.sourceUrl, abort.signal)
       } finally {
         if (currentJobAbort === abort) currentJobAbort = null
+        // Politeness pause after every attempt (success or failure) — without
+        // it, BullMQ's concurrency:1 worker pulls the next job the instant
+        // this one resolves, hammering LinkedIn back-to-back with none of the
+        // jitter the search stage already has.
+        await sleep(randomScrapeDelayMs(), abort.signal)
       }
     },
     { connection: getRedisConnectionOptions(), concurrency: 1 },

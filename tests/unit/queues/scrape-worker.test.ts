@@ -4,22 +4,25 @@ import { getDb, closeDb } from '../../../src/db/index.ts'
 import { jobContents } from '../../../src/db/schema.ts'
 import { initAppState } from '../../../src/state/app-state.ts'
 
-initAppState({ concurrency: 1, judgeConcurrency: 3, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000, loopCooldownMs: 300000 })
+initAppState({ concurrency: 1, model: 'test', minNavDelayMs: 3000, maxNavDelayMs: 8000 })
 
 const enqueueJudgeCalls: Array<{ jobId: string; sourceUrl: string }> = []
 
-// The scrape worker's browser stack (AgentBrowser, scrape-session.ts,
-// tab-guard.ts) is mocked so this file exercises processScrapeJob's own
-// control flow (dedupe, retry-vs-persist, enqueue-on-success) without a real
-// Chrome process — the same isolation approach judge-worker.test.ts already
-// used for its DB-only assertions.
-mock.module('../../../src/browser/scrape-session.ts', () => ({
-  getScrapeCdpUrl: async () => 'ws://fake',
-  invalidateScrapeCdpUrl: () => {},
+// The scrape worker's browser stack (pipeline-tab.ts, tab-guard.ts) is mocked
+// so this file exercises processScrapeJob's own control flow (dedupe,
+// retry-vs-persist, enqueue-and-wait-on-success) without a real Chrome
+// process — the same isolation approach judge-worker.test.ts already used for
+// its DB-only assertions. The fake judge job resolves immediately with
+// triggeredApply: false, so waitForJudgeAndApply never has to reach into
+// apply-queues.ts.
+mock.module('../../../src/browser/pipeline-tab.ts', () => ({
+  getPipelineBrowser: () => ({ browser: {}, cdpUrl: 'ws://fake' }),
+  ensurePipelineTab: async () => ({ matchFragment: '/jobs/view/fake' }),
 }))
 mock.module('../../../src/queues/judge-queues.ts', () => ({
   enqueueJudgeJob: async (jobId: string, sourceUrl: string) => {
     enqueueJudgeCalls.push({ jobId, sourceUrl })
+    return { waitUntilFinished: async () => ({ triggeredApply: false }) }
   },
   // Bun's mock.module is process-global and leaks into later test files, so
   // this stub must cover every export of judge-queues.ts — judge-commands.ts
@@ -27,6 +30,7 @@ mock.module('../../../src/queues/judge-queues.ts', () => ({
   // made that import throw "Export named 'getJudgeQueueCounts' not found"
   // when the full suite ran (isolated runs passed).
   getJudgeQueueCounts: async () => ({ waiting: 0, active: 0 }),
+  getJudgeQueueEvents: () => ({}),
   closeJudgeQueues: async () => {},
 }))
 

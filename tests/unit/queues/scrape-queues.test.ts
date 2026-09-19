@@ -11,7 +11,7 @@ class FakeQueue {
     this.added.push({ name, data, opts })
   }
   async getJobCounts(..._states: string[]) {
-    return { waiting: 2, active: 1 }
+    return { waiting: 2, active: 1, delayed: 3 }
   }
   async close() {
     this.closed = true
@@ -33,9 +33,9 @@ describe('scrape-queues', () => {
     expect((FakeQueue.instances[0]!.added[0]!.opts as { jobId: string }).jobId).toBe('scrape-12345')
   })
 
-  test('getScrapeQueueCounts reads waiting/active', async () => {
+  test('getScrapeQueueCounts reads waiting/active/delayed', async () => {
     const counts = await getScrapeQueueCounts()
-    expect(counts).toEqual({ waiting: 2, active: 1 })
+    expect(counts).toEqual({ waiting: 2, active: 1, delayed: 3 })
   })
 
   test('closeScrapeQueues closes the underlying queue', async () => {

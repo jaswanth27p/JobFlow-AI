@@ -196,8 +196,10 @@ export async function closeStrayTabs(browser: AgentBrowser, keepFragment: string
  * pointer — AND the OS-visual front tab, which is a separate thing entirely,
  * see tab-focus.ts — is corrected before the NEXT step acts on the wrong tab.
  * `cdpUrl` must be the SAME browser `browser` itself talks to — passed
- * explicitly rather than looked up, since different agents can now be
- * talking to entirely different browser processes (see easy-apply-session.ts). */
+ * explicitly rather than looked up. All agents share one bootstrap browser
+ * now (see src/browser/pipeline-tab.ts), so in practice there's only ever
+ * one cdpUrl in play, but this keeps the function correct if that ever
+ * changes. */
 export async function reclaimOwnTab(browser: AgentBrowser, cdpUrl: string, tab: OwnedTab): Promise<void> {
   const own = await findOwnTab(browser, tab)
   if (own && !own.active) {

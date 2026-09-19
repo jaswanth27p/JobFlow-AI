@@ -6,6 +6,7 @@ import { enqueueJudgeJob, getJudgeQueueEvents } from './judge-queues.ts'
 import { getScrapeQueueCounts } from './scrape-queues.ts'
 import { getApplyJobByQueueId, getApplyQueueEvents } from './apply-queues.ts'
 import { getPipelineBrowser, ensurePipelineTab } from '../browser/pipeline-tab.ts'
+import { reclaimOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
 import { waitForNetwork } from '../utils/network.ts'
 import { getCurrentConfig } from '../config/current.ts'
 import { getDb } from '../db/index.ts'
@@ -25,6 +26,16 @@ const SCRAPE_TAB: TabId = 'scrape'
 const DETAIL_PANE_WAIT_MS = 2000
 const DETAIL_PANE_MAX_ATTEMPTS = 2
 
+/** Upper bound on how long the scrape processor will block waiting for the
+ * judge job it just enqueued — sized to cover judge's own retry backoff
+ * (attempts:3, exponential 30s/60s/120s ≈ 210s worst case) plus real judging
+ * time. If exceeded, treated exactly like any other judge failure: logged,
+ * scraping moves on (see waitForJudgeAndApply's catch block). */
+const JUDGE_WAIT_TTL_MS = 5 * 60_000
+/** Same idea for the apply job a judge match triggers — easy-apply can take
+ * several minutes for a real multi-field application (maxSteps: 150). */
+const APPLY_WAIT_TTL_MS = 10 * 60_000
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.resolve()
   return new Promise((resolve) => {
@@ -37,6 +48,29 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       resolve()
     }
     signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** Races a promise against an abort signal — resolves to 'aborted' if the
+ * signal fires before the promise settles, otherwise resolves/rejects with the
+ * promise's own outcome. Lets an explicit stop interrupt a BullMQ
+ * waitUntilFinished immediately instead of waiting out its ttl. */
+function waitOrAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T | 'aborted'> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.resolve('aborted')
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve('aborted')
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(v)
+      },
+      (e) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(e)
+      },
+    )
   })
 }
 
@@ -108,13 +142,19 @@ async function readJobText(jobId: string, browser: AgentBrowser, signal?: AbortS
  * retries) is logged and treated as "nothing more to wait for" rather than
  * thrown — that failure is already recorded by that stage; scraping should
  * still move on to the next job. */
-async function waitForJudgeAndApply(jobId: string, sourceUrl: string): Promise<void> {
+async function waitForJudgeAndApply(jobId: string, sourceUrl: string, signal?: AbortSignal): Promise<void> {
   const judgeJobHandle = await enqueueJudgeJob(jobId, sourceUrl)
   let applyJobId: string | undefined
   try {
-    const result = (await judgeJobHandle.waitUntilFinished(getJudgeQueueEvents())) as
-      | { triggeredApply?: boolean; applyJobId?: string }
-      | undefined
+    const raw = await waitOrAbort(
+      judgeJobHandle.waitUntilFinished(getJudgeQueueEvents(), JUDGE_WAIT_TTL_MS),
+      signal,
+    )
+    if (raw === 'aborted') {
+      logger.warn({ jobId }, 'scrape: aborted while waiting for judge — stopping')
+      return
+    }
+    const result = raw as { triggeredApply?: boolean; applyJobId?: string } | undefined
     if (result?.triggeredApply) applyJobId = result.applyJobId
   } catch (err) {
     logger.warn({ err, jobId }, 'scrape: judge job did not finish cleanly — continuing to the next scrape job')
@@ -126,7 +166,13 @@ async function waitForJudgeAndApply(jobId: string, sourceUrl: string): Promise<v
   const applyJobHandle = await getApplyJobByQueueId(applyJobId)
   if (!applyJobHandle) return
   try {
-    await applyJobHandle.waitUntilFinished(getApplyQueueEvents())
+    const result = await waitOrAbort(
+      applyJobHandle.waitUntilFinished(getApplyQueueEvents(), APPLY_WAIT_TTL_MS),
+      signal,
+    )
+    if (result === 'aborted') {
+      logger.warn({ jobId }, 'scrape: aborted while waiting for apply — stopping')
+    }
   } catch (err) {
     logger.warn({ err, jobId }, 'scrape: apply job did not finish cleanly — continuing to the next scrape job')
   }
@@ -143,7 +189,7 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
   const db = getDb()
   const existing = await db.select({ jobId: jobContents.jobId }).from(jobContents).where(eq(jobContents.jobId, jobId))
   if (existing.length > 0) {
-    await waitForJudgeAndApply(jobId, sourceUrl)
+    await waitForJudgeAndApply(jobId, sourceUrl, signal)
     return
   }
 
@@ -158,9 +204,10 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
   const counts = await getScrapeQueueCounts()
   setAgentStatus(SCRAPE_TAB, 'running', `${counts.waiting} waiting (fetching ${jobId})`)
 
-  const { browser } = getPipelineBrowser()
+  const { browser, cdpUrl } = getPipelineBrowser()
+  let ownTab: OwnedTab
   try {
-    await ensurePipelineTab(applyUrl, `/jobs/view/${jobId}`)
+    ownTab = await ensurePipelineTab(applyUrl, `/jobs/view/${jobId}`)
   } catch (err) {
     logger.error({ err, jobId }, 'scrape: failed to open job tab')
     pushLog(SCRAPE_TAB, `Could not open job ${jobId} — will retry. (${summarizeError(err)})`)
@@ -168,6 +215,10 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
   }
 
   if (signal?.aborted) return
+  // Re-assert this tab is still the active one immediately before acting on it
+  // — same hijack guard search-agent.ts/easy-apply-agent.ts already apply, now
+  // that the browser is shared across three stages rather than dedicated to one.
+  await reclaimOwnTab(browser, cdpUrl, ownTab)
   const jobText = await readJobText(jobId, browser, signal)
   if (signal?.aborted) return
   if (!jobText) {

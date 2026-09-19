@@ -29,10 +29,10 @@ export async function enqueueScrapeJob(jobId: string, sourceUrl: string): Promis
   )
 }
 
-export async function getScrapeQueueCounts(): Promise<{ waiting: number; active: number }> {
+export async function getScrapeQueueCounts(): Promise<{ waiting: number; active: number; delayed: number }> {
   const queue = getScrapeQueue()
-  const counts = await queue.getJobCounts('waiting', 'active')
-  return { waiting: counts.waiting ?? 0, active: counts.active ?? 0 }
+  const counts = await queue.getJobCounts('waiting', 'active', 'delayed')
+  return { waiting: counts.waiting ?? 0, active: counts.active ?? 0, delayed: counts.delayed ?? 0 }
 }
 
 /** Must be called on shutdown — see judge-queues.ts's closeJudgeQueues for

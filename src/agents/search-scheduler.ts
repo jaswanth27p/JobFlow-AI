@@ -58,6 +58,13 @@ export function formatDuration(ms: number): string {
   return `${m}m`
 }
 
+/** How long to wait before the next cycle, given how long the just-finished
+ * one took against the target duration — zero if it met or exceeded the
+ * target. Exported for direct unit testing (see search-scheduler-timing.test.ts). */
+export function nextCycleWaitMs(elapsedMs: number, durationMs: number): number {
+  return Math.max(0, durationMs - elapsedMs)
+}
+
 interface SchedulerState {
   on: boolean
   durationMs: number | null
@@ -105,7 +112,7 @@ export function isAutoModeOn(): boolean {
 async function waitForDrain(signal: AbortSignal): Promise<void> {
   while (!signal.aborted) {
     const counts = await getScrapeQueueCounts()
-    if (counts.waiting === 0 && counts.active === 0) return
+    if (counts.waiting === 0 && counts.active === 0 && counts.delayed === 0) return
     await sleep(2000, signal)
   }
 }
@@ -117,37 +124,46 @@ async function waitForDrain(signal: AbortSignal): Promise<void> {
  * Once search returns, the scrape worker (re)starts and every job it found is
  * scraped/judged/applied to, one at a time, before this resolves. */
 async function runCycle(signal: AbortSignal): Promise<void> {
-  if (isSearchRunning()) {
-    pushLog(SEARCH_TAB, 'Auto mode: skipping this cycle — a search is already running.')
-    return
-  }
-  if (state.entries.length === 0) {
-    pushLog(SEARCH_TAB, 'Auto mode: no configured URLs to scan — skipping this cycle.')
-    return
-  }
-
-  // No-op if it was already stopped (e.g. the very first cycle).
-  await stopScrapeWorker()
-
+  // Catch-all so ANY failure after the search phase (a Redis blip during
+  // waitForDrain's poll loop, a throw from startScrapeWorker/closePipelineTab)
+  // can't reject runAutoLoop's promise and silently kill the whole rotation —
+  // the pre-refactor scheduler's runConfiguredUrls had the same catch-all.
   try {
-    await runSearchUrls(state.entries)
+    if (isSearchRunning()) {
+      pushLog(SEARCH_TAB, 'Auto mode: skipping this cycle — a search is already running.')
+      return
+    }
+    if (state.entries.length === 0) {
+      pushLog(SEARCH_TAB, 'Auto mode: no configured URLs to scan — skipping this cycle.')
+      return
+    }
+
+    // No-op if it was already stopped (e.g. the very first cycle).
+    await stopScrapeWorker()
+
+    try {
+      await runSearchUrls(state.entries)
+    } catch (err) {
+      pushLog(SEARCH_TAB, `Auto mode: search phase failed: ${summarizeError(err)}`)
+      logger.error({ err }, 'auto mode: search phase failed')
+    }
+
+    if (signal.aborted) return
+
+    // Judge/apply are session-lifetime workers (idempotent no-op once started)
+    // — they only ever react to what the scrape worker feeds them, and the
+    // scrape worker only runs during this drain phase, so it's safe to leave
+    // them running continuously rather than starting/stopping them every cycle.
+    startEasyApplyWorker()
+    startJudgeWorker()
+    startScrapeWorker()
+
+    await waitForDrain(signal)
+    await closePipelineTab()
   } catch (err) {
-    pushLog(SEARCH_TAB, `Auto mode: search phase failed: ${summarizeError(err)}`)
-    logger.error({ err }, 'auto mode: search phase failed')
+    pushLog(SEARCH_TAB, `Auto mode: cycle failed: ${summarizeError(err)}`)
+    logger.error({ err }, 'auto mode: cycle failed')
   }
-
-  if (signal.aborted) return
-
-  // Judge/apply are session-lifetime workers (idempotent no-op once started)
-  // — they only ever react to what the scrape worker feeds them, and the
-  // scrape worker only runs during this drain phase, so it's safe to leave
-  // them running continuously rather than starting/stopping them every cycle.
-  startEasyApplyWorker()
-  startJudgeWorker()
-  startScrapeWorker()
-
-  await waitForDrain(signal)
-  await closePipelineTab()
 }
 
 async function runAutoLoop(): Promise<void> {
@@ -163,7 +179,7 @@ async function runAutoLoop(): Promise<void> {
 
     const elapsed = Date.now() - t0
     const durationMs = state.durationMs!
-    const waitMs = Math.max(0, durationMs - elapsed)
+    const waitMs = nextCycleWaitMs(elapsed, durationMs)
     if (waitMs > 0) {
       pushLog(SEARCH_TAB, `Auto mode: cycle finished in ~${formatDuration(elapsed)} — next cycle in ~${formatDuration(waitMs)}.`)
     } else {

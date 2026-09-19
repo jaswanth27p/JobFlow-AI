@@ -1,8 +1,10 @@
-import { appState, pushLog } from '../state/app-state.ts'
+import { pushLog } from '../state/app-state.ts'
 import { runSearchUrls, isSearchRunning, stopSearchAndWait, type ScanUrlEntry } from './search-agent.ts'
 import { startEasyApplyWorker } from '../queues/easy-apply-worker.ts'
 import { startJudgeWorker } from '../queues/judge-worker.ts'
-import { startScrapeWorker } from '../queues/scrape-worker.ts'
+import { startScrapeWorker, stopScrapeWorker } from '../queues/scrape-worker.ts'
+import { getScrapeQueueCounts } from '../queues/scrape-queues.ts'
+import { closePipelineTab } from '../browser/pipeline-tab.ts'
 import { logger } from '../utils/logger.ts'
 import { summarizeError } from '../utils/error-summary.ts'
 import type { TabId } from '../state/types.ts'
@@ -23,8 +25,6 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 const SEARCH_TAB: TabId = 'search'
-
-export type AutoMode = 'loop' | 'interval'
 
 /** Parses a duration string into milliseconds. Accepts `<n>h`, `<n>m`, combined
  * `<n>h<n>m`, or a bare number (interpreted as hours). Returns null (not a throw) on
@@ -59,11 +59,8 @@ export function formatDuration(ms: number): string {
 }
 
 interface SchedulerState {
-  mode: AutoMode | null
-  intervalMs: number | null
-  intervalHandle: ReturnType<typeof setInterval> | null
-  loopActive: boolean
-  tickRunning: boolean
+  on: boolean
+  durationMs: number | null
   /** The URL entries and group label picked when /auto-on was started —
    * captured once, not re-read from config each cycle, so a later
    * /reload-config or config edit never silently alters an in-flight
@@ -73,28 +70,53 @@ interface SchedulerState {
 }
 
 const state: SchedulerState = {
-  mode: null,
-  intervalMs: null,
-  intervalHandle: null,
-  loopActive: false,
-  tickRunning: false,
+  on: false,
+  durationMs: null,
   entries: [],
   groupLabel: '',
 }
 
-/** Tracks whatever single run is currently in flight, regardless of mode, so
- * stopAutoModeAndWait can await it on shutdown without caring which mode was active. */
+/** Tracks whatever cycle is currently in flight so stopAutoModeAndWait can
+ * await it on shutdown. */
 let activeWorkPromise: Promise<void> | null = null
 
-/** Aborts the between-cycle cooldown sleep in loop mode so /auto-off (and
- * shutdown) doesn't have to wait out the full loopCooldownMs to take effect. */
-let loopCooldownAbort: AbortController | null = null
+/** Aborts the between-cycle wait so /auto-off (and shutdown) doesn't have to
+ * wait out the full remaining duration to take effect. */
+let cooldownAbort: AbortController | null = null
+
+/** Aborts the current cycle's drain-wait poll loop on shutdown — see
+ * stopAutoModeAndWait. A soft /auto-off deliberately does NOT abort this: the
+ * in-flight cycle (and the easy-apply/scrape/judge workers it started) keeps
+ * running to completion, same as today's /auto-off leaving the easy-apply
+ * queue worker running. */
+let cycleAbort: AbortController | null = null
 
 export function isAutoModeOn(): boolean {
-  return state.mode !== null
+  return state.on
 }
 
-async function runConfiguredUrls(): Promise<void> {
+/** Polls the scrape queue until it's fully drained (no waiting or active
+ * job). Because scrape-worker.ts's processor blocks on judge (and any apply
+ * it triggers) finishing before its own job resolves — see
+ * docs/superpowers/specs/2026-09-19-single-tab-sequential-pipeline-design.md —
+ * an empty scrape queue means the ENTIRE per-job chain has resolved for every
+ * job this cycle found, not just the scrape step. No need to separately poll
+ * the judge/apply queues. */
+async function waitForDrain(signal: AbortSignal): Promise<void> {
+  while (!signal.aborted) {
+    const counts = await getScrapeQueueCounts()
+    if (counts.waiting === 0 && counts.active === 0) return
+    await sleep(2000, signal)
+  }
+}
+
+/** One full cycle: search runs to completion first — scrape/judge/apply are
+ * deliberately not consuming yet (see the stopScrapeWorker call below), since
+ * they'd otherwise grab the one shared pipeline tab out from under an
+ * in-progress search page load the instant search enqueues the first job id.
+ * Once search returns, the scrape worker (re)starts and every job it found is
+ * scraped/judged/applied to, one at a time, before this resolves. */
+async function runCycle(signal: AbortSignal): Promise<void> {
   if (isSearchRunning()) {
     pushLog(SEARCH_TAB, 'Auto mode: skipping this cycle — a search is already running.')
     return
@@ -103,127 +125,101 @@ async function runConfiguredUrls(): Promise<void> {
     pushLog(SEARCH_TAB, 'Auto mode: no configured URLs to scan — skipping this cycle.')
     return
   }
+
+  // No-op if it was already stopped (e.g. the very first cycle).
+  await stopScrapeWorker()
+
   try {
     await runSearchUrls(state.entries)
   } catch (err) {
-    pushLog(SEARCH_TAB, `Auto mode: cycle failed: ${summarizeError(err)}`)
-    logger.error({ err }, 'auto mode: cycle failed')
+    pushLog(SEARCH_TAB, `Auto mode: search phase failed: ${summarizeError(err)}`)
+    logger.error({ err }, 'auto mode: search phase failed')
   }
+
+  if (signal.aborted) return
+
+  // Judge/apply are session-lifetime workers (idempotent no-op once started)
+  // — they only ever react to what the scrape worker feeds them, and the
+  // scrape worker only runs during this drain phase, so it's safe to leave
+  // them running continuously rather than starting/stopping them every cycle.
+  startEasyApplyWorker()
+  startJudgeWorker()
+  startScrapeWorker()
+
+  await waitForDrain(signal)
+  await closePipelineTab()
 }
 
-async function runLoop(): Promise<void> {
-  while (state.mode === 'loop' && state.loopActive) {
-    const work = runConfiguredUrls()
+async function runAutoLoop(): Promise<void> {
+  while (state.on) {
+    const t0 = Date.now()
+    cycleAbort = new AbortController()
+    const work = runCycle(cycleAbort.signal)
     activeWorkPromise = work
     await work
+    cycleAbort = null
 
-    if (state.mode !== 'loop' || !state.loopActive) break
+    if (!state.on) break
 
-    // Cooldown between full cycles — without this, loop mode reopens the same
-    // search URLs back-to-back nonstop, which reads as bot behavior to
-    // LinkedIn (real rate-limit/ban risk). Abortable so /auto-off is instant.
-    const cooldownMs = 300_000 // 5 minutes
-    pushLog(SEARCH_TAB, `Auto mode: cycle finished — next loop cycle in ~${formatDuration(cooldownMs)}.`)
-    loopCooldownAbort = new AbortController()
-    await sleep(cooldownMs, loopCooldownAbort.signal)
-    loopCooldownAbort = null
-  }
-}
-
-async function runIntervalTick(): Promise<void> {
-  if (state.tickRunning) {
-    pushLog(SEARCH_TAB, 'Auto mode: previous interval cycle is still running — skipping this tick.')
-    return
-  }
-  state.tickRunning = true
-  const work = (async () => {
-    try {
-      await runConfiguredUrls()
-      if (state.mode === 'interval' && state.intervalMs !== null) {
-        pushLog(SEARCH_TAB, `Auto mode: cycle finished — next tick in ~${formatDuration(state.intervalMs)}.`)
-      }
-    } finally {
-      state.tickRunning = false
+    const elapsed = Date.now() - t0
+    const durationMs = state.durationMs!
+    const waitMs = Math.max(0, durationMs - elapsed)
+    if (waitMs > 0) {
+      pushLog(SEARCH_TAB, `Auto mode: cycle finished in ~${formatDuration(elapsed)} — next cycle in ~${formatDuration(waitMs)}.`)
+    } else {
+      pushLog(
+        SEARCH_TAB,
+        `Auto mode: cycle finished in ~${formatDuration(elapsed)}, at or past the ${formatDuration(durationMs)} target — starting the next cycle immediately.`,
+      )
     }
-  })()
-  activeWorkPromise = work
-  await work
+    cooldownAbort = new AbortController()
+    await sleep(waitMs, cooldownAbort.signal)
+    cooldownAbort = null
+  }
 }
 
-/** Starts the easy-apply, scrape, and judge queue workers if they aren't
- * already running — idempotent no-op when already started, so this is safe
- * to call unconditionally. All three are long-running consumers, started
- * once per app session rather than per scan cycle, same as each other. */
-function ensureApplyWorkersRunning(): void {
-  startEasyApplyWorker()
-  startScrapeWorker()
-  startJudgeWorker()
-}
-
-export function startAutoMode(mode: AutoMode, entries: ScanUrlEntry[], groupLabel: string, intervalMs?: number): void {
-  if (state.mode !== null) {
-    pushLog(SEARCH_TAB, `Auto mode is already on (${state.mode}). Use /auto-off first.`)
+export function startAutoMode(entries: ScanUrlEntry[], groupLabel: string, durationMs: number): void {
+  if (state.on) {
+    pushLog(SEARCH_TAB, 'Auto mode is already on. Use /auto-off first.')
     return
   }
 
+  state.on = true
+  state.durationMs = durationMs
   state.entries = entries
   state.groupLabel = groupLabel
-  ensureApplyWorkersRunning()
-
-  if (mode === 'loop') {
-    state.mode = 'loop'
-    state.loopActive = true
-    pushLog(SEARCH_TAB, `Auto mode: loop started (group: ${groupLabel}).`)
-    void runLoop()
-    return
-  }
-
-  // mode === 'interval'
-  if (!intervalMs) throw new Error('intervalMs is required for interval mode')
-  state.mode = 'interval'
-  state.intervalMs = intervalMs
-  pushLog(SEARCH_TAB, `Auto mode: interval started, every ${formatDuration(intervalMs)} (group: ${groupLabel}).`)
-  state.intervalHandle = setInterval(() => {
-    void runIntervalTick()
-  }, intervalMs)
-  void runIntervalTick()
+  pushLog(SEARCH_TAB, `Auto mode started, target cycle ~${formatDuration(durationMs)} (group: ${groupLabel}).`)
+  void runAutoLoop()
 }
 
 export function stopAutoMode(): void {
-  if (state.mode === null) {
+  if (!state.on) {
     pushLog(SEARCH_TAB, 'Auto mode is not on.')
     return
   }
   pushLog(SEARCH_TAB, 'Auto mode: stopping (any in-flight cycle will finish on its own).')
-  if (state.intervalHandle) {
-    clearInterval(state.intervalHandle)
-    state.intervalHandle = null
-  }
-  state.loopActive = false
-  state.mode = null
-  state.intervalMs = null
-  loopCooldownAbort?.abort()
+  state.on = false
+  state.durationMs = null
+  cooldownAbort?.abort()
 }
 
-/** Silent variant for app shutdown — no user-facing log, just tears the scheduler down. */
 function stopAutoModeSilently(): void {
-  if (state.intervalHandle) {
-    clearInterval(state.intervalHandle)
-    state.intervalHandle = null
-  }
-  state.loopActive = false
-  state.mode = null
-  state.intervalMs = null
-  loopCooldownAbort?.abort()
+  state.on = false
+  state.durationMs = null
+  cooldownAbort?.abort()
 }
 
-/** For app shutdown. Order matters here: stop scheduling FIRST (so the loop/interval
- * driver never starts another cycle once the current one ends), then abort+wait for
- * whatever runSearchUrls call is actually in flight via search-agent's own
- * stopSearchAndWait (shared AbortController — covers both manually-triggered and
- * scheduler-triggered runs), and only then await activeWorkPromise as a final catch-all. */
+/** For app shutdown. Order matters here: stop scheduling FIRST (so the loop
+ * never starts another cycle once the current one ends), abort the
+ * drain-wait poll (cycleAbort) so it doesn't hang waiting for a queue nothing
+ * will ever drain again once the workers are torn down elsewhere in
+ * cleanup(), abort+wait for whatever search is actually in flight via
+ * search-agent's own stopSearchAndWait (shared AbortController — covers both
+ * manually-triggered and scheduler-triggered runs), and only then await
+ * activeWorkPromise as a final catch-all. */
 export async function stopAutoModeAndWait(): Promise<void> {
   stopAutoModeSilently()
+  cycleAbort?.abort()
   await stopSearchAndWait()
   if (activeWorkPromise) {
     await activeWorkPromise.catch(() => {})

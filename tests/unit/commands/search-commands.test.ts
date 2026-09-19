@@ -60,23 +60,13 @@ describe('search commands', () => {
     expect(appState.tabs.search.logs).toContain('Auto mode is not on.')
   })
 
-  test('/auto-on with no mode arg opens the mode picker instead of starting anything', async () => {
+  test('/auto-on with no duration arg opens the duration picker instead of starting anything', async () => {
     await getCommand('auto-on')!.run({ args: [], rawArgs: '' })
     expect(optionPickerOpen()).toBe(true)
   })
 
-  test('/auto-on with an unrecognized mode logs usage', async () => {
-    await getCommand('auto-on')!.run({ args: ['bogus'], rawArgs: 'bogus' })
-    expect(appState.tabs.search.logs).toContain('Usage: /auto-on loop | /auto-on interval <duration>')
-  })
-
-  test('/auto-on interval with no duration opens the duration picker', async () => {
-    await getCommand('auto-on')!.run({ args: ['interval'], rawArgs: 'interval' })
-    expect(optionPickerOpen()).toBe(true)
-  })
-
-  test('/auto-on interval with an invalid duration logs a rejection', async () => {
-    await getCommand('auto-on')!.run({ args: ['interval', 'not-a-duration'], rawArgs: 'interval not-a-duration' })
+  test('/auto-on with an invalid duration logs a rejection', async () => {
+    await getCommand('auto-on')!.run({ args: ['not-a-duration'], rawArgs: 'not-a-duration' })
     expect(appState.tabs.search.logs).toContain(
       'Invalid duration: not-a-duration. Use formats like 1h, 3h, 90m, 3h30m.',
     )
@@ -99,12 +89,12 @@ describe('search commands', () => {
     expect(optionPickerOpen()).toBe(true)
   })
 
-  test('/auto-on loop opens the group picker as its final step', async () => {
+  test('/auto-on <duration> opens the group picker as its final step', async () => {
     setCurrentConfig({
       ...makeConfig(),
       urlGroups: [{ name: 'Hyderabad', urls: [{ url: 'https://example.com', scanFullList: false }] }],
     })
-    await getCommand('auto-on')!.run({ args: ['loop'], rawArgs: 'loop' })
+    await getCommand('auto-on')!.run({ args: ['1h'], rawArgs: '1h' })
     expect(optionPickerOpen()).toBe(true)
   })
 })

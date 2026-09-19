@@ -227,7 +227,7 @@ export async function processScrapeJob(jobId: string, sourceUrl: string, signal?
 
   await db.insert(jobContents).values({ jobId, sourceUrl, content: jobText }).onConflictDoNothing()
   pushLog(SCRAPE_TAB, `Job ${jobId} fetched (${jobText.length} chars) — queued for judging.`)
-  await waitForJudgeAndApply(jobId, sourceUrl)
+  await waitForJudgeAndApply(jobId, sourceUrl, signal)
 }
 
 let worker: Worker | null = null

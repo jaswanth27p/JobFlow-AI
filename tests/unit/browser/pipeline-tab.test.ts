@@ -69,6 +69,7 @@ describe('pipeline-tab', () => {
     expect(calls).toEqual([
       'open:https://example.com/search:/jobs/search',
       'navigate:/jobs/search->https://example.com/jobs/view/2:/jobs/view/2',
+      'close:/jobs/search',
       'open:https://example.com/jobs/view/2:/jobs/view/2',
     ])
   })

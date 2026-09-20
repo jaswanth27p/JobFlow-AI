@@ -30,11 +30,26 @@ const DETAIL_PANE_MAX_ATTEMPTS = 2
  * judge job it just enqueued — sized to cover judge's own retry backoff
  * (attempts:3, exponential 30s/60s/120s ≈ 210s worst case) plus real judging
  * time. If exceeded, treated exactly like any other judge failure: logged,
- * scraping moves on (see waitForJudgeAndApply's catch block). */
+ * scraping moves on (see waitForJudgeAndApply's catch block). Safe to bound:
+ * judge-worker.ts never touches the shared browser tab, so a judge job still
+ * running in the background after this fires can't race scrape for it. */
 const JUDGE_WAIT_TTL_MS = 5 * 60_000
-/** Same idea for the apply job a judge match triggers — easy-apply can take
- * several minutes for a real multi-field application (maxSteps: 150). */
-const APPLY_WAIT_TTL_MS = 10 * 60_000
+/** Deliberately NO ttl on the apply wait (see waitForJudgeAndApply) — unlike
+ * judge, easy-apply DOES hold the shared pipeline tab (see pipeline-tab.ts)
+ * for as long as it runs, and it can legitimately run far longer than any
+ * fixed bound: ask-human-and-remember (easy-apply-agent.ts) blocks on
+ * waitForAnswer with NO timeout of its own, so a human taking 20 minutes to
+ * answer a form question is normal, not stuck. A previous fixed
+ * APPLY_WAIT_TTL_MS here let scrape "give up" and resolve while the apply job
+ * was still genuinely running — BullMQ's concurrency:1 then pulled the NEXT
+ * scrape job immediately, which called ensurePipelineTab and navigated the
+ * ONE shared tab out from under the still-in-progress easy-apply agent
+ * (observed: the apply agent's tool calls started failing with "Browser was
+ * closed externally" / CDP connect errors mid-form, with nothing ever having
+ * cancelled or reported it as failed). Removing the ttl restores the actual
+ * invariant the single-tab sequential design depends on: nothing else touches
+ * the tab until the current job's whole chain has truly finished. Still
+ * interruptible via `signal` (see waitOrAbort) for an explicit stop/shutdown. */
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.resolve()
@@ -167,7 +182,7 @@ async function waitForJudgeAndApply(jobId: string, sourceUrl: string, signal?: A
   if (!applyJobHandle) return
   try {
     const result = await waitOrAbort(
-      applyJobHandle.waitUntilFinished(getApplyQueueEvents(), APPLY_WAIT_TTL_MS),
+      applyJobHandle.waitUntilFinished(getApplyQueueEvents()),
       signal,
     )
     if (result === 'aborted') {

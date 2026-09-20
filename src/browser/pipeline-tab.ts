@@ -63,6 +63,16 @@ export async function ensurePipelineTab(url: string, matchFragment: string): Pro
       // below will fail the same way, which is the correct, loud failure.
       if (!isBrowserConnectionError(err) && !isOwnedTabGoneError(err)) throw err
       logger.warn({ err }, 'pipeline: could not reuse existing tab, opening a fresh one')
+      // isBrowserConnectionError's patterns include transient CDP/protocol
+      // hiccups (e.g. "protocol error", "session closed"), not just a
+      // genuinely-closed tab — treating every match as "already gone" and
+      // skipping cleanup left a still-alive tab behind every time the
+      // classification was a false positive, so the window grew one extra
+      // tab past login+pipeline every time this path fired (observed: 2nd
+      // search URL landing in a brand-new 3rd tab, with the 2nd tab from the
+      // 1st URL never closed). Best-effort close before abandoning it —
+      // closeOwnTab already no-ops safely if the tab really is gone.
+      await closeOwnTab(browser, pipelineTab)
       pipelineTab = null
     }
   }

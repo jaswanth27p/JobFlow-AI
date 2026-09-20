@@ -252,7 +252,7 @@ export async function processEasyApplyJob(jobId: string, signal?: AbortSignal): 
     return
   }
 
-  await processEasyApplyJobInTab(job, jobRecord, config, browser, cdpUrl, ownTab)
+  await processEasyApplyJobInTab(job, jobRecord, config, browser, cdpUrl, ownTab, signal)
 }
 
 async function processEasyApplyJobInTab(
@@ -262,6 +262,7 @@ async function processEasyApplyJobInTab(
   browser: AgentBrowser,
   cdpUrl: string,
   ownTab: OwnedTab,
+  signal?: AbortSignal,
 ): Promise<void> {
   // Bounded so a job that keeps needing new info can't loop forever — after
   // this many "ask human, retry" rounds it's written as failed instead of
@@ -322,8 +323,23 @@ async function processEasyApplyJobInTab(
         // this agent's "active tab" pointer the instant it opens a tab anywhere
         // in the shared browser — see tab-guard.ts. Reclaim before every step.
         onStepFinish: () => reclaimOwnTab(browser, cdpUrl, ownTab),
+        // Without this, nothing could actually interrupt a running
+        // agent.generate() call — stopEasyApplyWorker()/the shutdown path
+        // could only abort the AbortController and then wait, unbounded, for
+        // this to finish naturally (up to maxSteps:150 worth of tool calls),
+        // which on /exit either hung the whole app or forced a user to kill
+        // the process outright, tearing down the browser out from under a
+        // still-running generate() call (surfaced as raw "Browser was closed
+        // externally"/CDP-connect errors dumped to the terminal after exit).
+        // Passing the signal lets Mastra stop the loop promptly instead.
+        abortSignal: signal,
       })
     } catch (err) {
+      // A deliberate stop (queue stop / app shutdown), not a real failure —
+      // don't write a 'failed' row for it. The job stays whatever status it
+      // already had (still 'queued'), so it's simply picked up again next
+      // time the easy-apply queue runs.
+      if (signal?.aborted) return
       // A connection error here means the bootstrap browser died mid-job —
       // there is no separate dedicated browser to relaunch anymore (see
       // pipeline-tab.ts); a dead bootstrap browser has no relaunch path in
@@ -335,6 +351,8 @@ async function processEasyApplyJobInTab(
       }
       return
     }
+
+    if (signal?.aborted) return
 
     if (!ctx.reported) {
       await writeFailedApplication(jobRecord, 'Agent finished without reporting a result', 'blocked', null, ctx.answers)

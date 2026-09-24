@@ -4,6 +4,7 @@ import type { AgentBrowser } from '@mastra/agent-browser'
 import type { Page } from 'playwright-core'
 import { getPipelineBrowser, ensurePipelineTab } from '../browser/pipeline-tab.ts'
 import { reclaimOwnTab, type OwnedTab } from '../browser/tab-guard.ts'
+import { getCurrentConfig } from '../config/current.ts'
 import { getDb } from '../db/index.ts'
 import { jobs, jobContents, searchRuns } from '../db/schema.ts'
 import { appState, pushLog, setAgentStatus } from '../state/app-state.ts'
@@ -322,6 +323,8 @@ export async function filterUnseenJobIds(ids: string[]): Promise<string[]> {
 async function scanOneUrl(entry: ScanUrlEntry, ctx: ScanRunContext, browser: AgentBrowser, cdpUrl: string, ownTab: OwnedTab): Promise<'ok' | 'aborted'> {
   let pageIndex = 0
   let previousPageIds: string[] = []
+  let queuedForThisUrl = 0
+  const maxJobsPerUrl = getCurrentConfig().search.maxJobsPerUrl
 
   while (pageIndex < MAX_PAGES_PER_URL) {
     if (ctx.signal.aborted) return 'aborted'
@@ -364,10 +367,16 @@ async function scanOneUrl(entry: ScanUrlEntry, ctx: ScanRunContext, browser: Age
       for (const id of newIds) {
         await enqueueScrapeJob(id, entry.url)
         ctx.queuedForScrape++
+        queuedForThisUrl++
       }
       if (newIds.length > 0) {
         pushLog(SEARCH_TAB, `Queued ${newIds.length} new job(s) for judgment (${pageIds.length - newIds.length} already seen).`)
       }
+    }
+
+    if (maxJobsPerUrl !== undefined && queuedForThisUrl >= maxJobsPerUrl) {
+      pushLog(SEARCH_TAB, `Hit maxJobsPerUrl cap (${maxJobsPerUrl}) for this URL — moving to next URL.`)
+      return 'ok'
     }
 
     const done = isLastPage(pageIds, previousPageIds)

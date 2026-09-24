@@ -59,11 +59,15 @@ export const appConfigSchema = z.object({
   search: z.object({
     // Rate-limit guard to avoid tripping LinkedIn's automation defenses:
     // min/maxNavDelayMs bracket a randomized human-like pause inserted (in
-    // code, not left to the model) after every browser navigation. There is
-    // no cap on jobs scanned per run — see check-page-relevance-ratio in
-    // search-agent.ts for the per-URL pagination stop condition instead.
+    // code, not left to the model) after every browser navigation.
     minNavDelayMs: z.number().int().min(0).default(3000),
     maxNavDelayMs: z.number().int().min(0).default(8000),
+    /** Per-URL cap on NEW job ids queued for scraping before scanOneUrl
+     * (search-agent.ts) stops paginating that URL and moves to the next one.
+     * Counts only newly-queued ids, not already-seen ones re-encountered on
+     * every page. Unset/undefined means no cap — walk every URL to its
+     * genuine end (or MAX_PAGES_PER_URL). */
+    maxJobsPerUrl: z.number().int().positive().optional(),
   }).default({ minNavDelayMs: 3000, maxNavDelayMs: 8000 }),
 })
 
